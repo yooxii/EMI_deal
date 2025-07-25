@@ -1,0 +1,7 @@
+<RCC>
+  <qresource prefix="emipdf">
+    <file>acbel_logo.jpg</file>
+    <file>acbel_logo_s.jpg</file>
+    <file>acbel-1.jpg</file>
+  </qresource>
+</RCC>
