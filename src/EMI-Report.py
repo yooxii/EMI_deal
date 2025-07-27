@@ -12,7 +12,7 @@ import logging
 from ui.ui_EMC import *
 from ui.ui_docx2pdf import Ui_Docx2PdfWin
 from PySide6.QtWidgets import QProgressBar, QMessageBox, QCheckBox, QDialog, QFileDialog
-from PySide6.QtCore import QThread
+from PySide6.QtCore import QThread, Signal, Slot
 from qt_material import QtStyleTools, apply_stylesheet
 
 # 日志配置
@@ -26,10 +26,13 @@ logger.addHandler(handler)
 
 
 class ConvertThread(QThread):
-    def __init__(self, statusBar_docx, docx_path=None):
+    docx_count = Signal(int)
+    docx_curr = Signal(int)
+    docx_end = Signal()
+
+    def __init__(self, docx_path=None):
         super().__init__()
         self.docx_path = docx_path
-        self.statusBar_docx = statusBar_docx
 
     def run(self):
         if self.docx_path is None:
@@ -52,14 +55,8 @@ class ConvertThread(QThread):
         else:
             source_files = [docx_path]
         file_count = len(source_files)
-
-        # 创建状态栏进度条
-        self.statusBar_docx.showMessage("正在转换DOCX文件...")
-        self.pgBar = QProgressBar(self.statusBar_docx)
-        self.pgBar.setMinimum(0)
-        self.pgBar.setMaximum(file_count)
-        self.pgBar.setValue(0)
-        self.statusBar_docx.addPermanentWidget(self.pgBar)
+        self.docx_count.emit(file_count)
+        curr = 0
         for file in source_files:
             docx_file = os.path.join(docx_path, file)
             pdf_file = os.path.join(docx_path, file.replace(".docx", ".pdf"))
@@ -69,14 +66,10 @@ class ConvertThread(QThread):
                 doc.Close(SaveChanges=0)
             except Exception as e:
                 logger.error(f"Error converting {docx_file} to PDF: {e}")
-            value = self.pgBar.value() + 1
-            self.pgBar.setValue(value)
-            self.statusBar_docx.showMessage(f"正在转换DOCX文件...{value}/{file_count}")
-        self.statusBar_docx.removeWidget(self.pgBar)
-        self.statusBar_docx.showMessage(
-            f"转换DOCX文件:{value}成功/{file_count-value}失败"
-        )
-        logger.info(f"Converted {value} success/{file_count-value} fail files to PDF.")
+            curr = curr + 1
+            self.docx_curr.emit(curr)
+        self.docx_end.emit()
+        logger.info(f"Converted {curr} success/{file_count-curr} fail files to PDF.")
         word.Quit()
 
 
@@ -87,13 +80,17 @@ class Docx2PdfWindow(QMainWindow, Ui_Docx2PdfWin, QtStyleTools):
         self.rootpath = (
             rootpath if rootpath else os.path.join(os.path.expanduser("~"), "Documents")
         )
-        self.docx2pdf_thread = ConvertThread(self.statusBar_docx)
+        self.docx2pdf_thread = ConvertThread()
 
         self.btn_docxdir.clicked.connect(lambda: self.select_docx_path(is_dir=True))
         self.button_docxfile.clicked.connect(
             lambda: self.select_docx_path(is_dir=False)
         )
-        self.btn_docx2pdf.clicked.connect(self.docx2pdf_thread.start)
+        self.btn_docx2pdf.clicked.connect(self.docx2pdf_thread.run)
+        self.docx2pdf_thread.docx_count.connect(self.createStatusBar)
+        self.docx2pdf_thread.docx_curr.connect(self.updateStatusBar)
+        self.docx2pdf_thread.docx_end.connect(self.endStatus)
+        self.docx2pdf_thread.start()
 
     def select_docx_path(self, is_dir=True):
         if is_dir:
@@ -105,6 +102,7 @@ class Docx2PdfWindow(QMainWindow, Ui_Docx2PdfWin, QtStyleTools):
             self.rootpath = os.path.split(path)[0]
             if path:
                 self.textEdit_docx.setText(path)
+                self.docx2pdf_thread.docx_path = path
         else:
             path = QFileDialog.getOpenFileName(
                 self,
@@ -116,6 +114,30 @@ class Docx2PdfWindow(QMainWindow, Ui_Docx2PdfWin, QtStyleTools):
             if path:
                 self.textEdit_docx.setText(path[0])
                 self.docx2pdf_thread.docx_path = path[0]
+
+    @Slot(int)
+    def createStatusBar(self, file_count):
+        self.file_count = file_count
+        # 创建状态栏进度条
+        self.statusBar_docx.showMessage("正在转换DOCX文件...")
+        self.pgBar = QProgressBar(self.statusBar_docx)
+        self.pgBar.setMinimum(0)
+        self.pgBar.setMaximum(file_count)
+        self.pgBar.setValue(0)
+        self.statusBar_docx.addPermanentWidget(self.pgBar)
+
+    @Slot(int)
+    def updateStatusBar(self, value):
+        self.curr = value
+        self.pgBar.setValue(value)
+        self.statusBar_docx.showMessage(f"正在转换DOCX文件...{value}/{self.file_count}")
+
+    @Slot()
+    def endStatus(self):
+        self.statusBar_docx.removeWidget(self.pgBar)
+        self.statusBar_docx.showMessage(
+            f"转换DOCX文件:{self.curr}成功/{self.file_count-self.curr}失败"
+        )
 
     def closeEvent(self, event):
         self.deleteLater()
@@ -142,7 +164,7 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
             "CloseExcel": False,  # 是否在处理完毕后关闭excel程序
         }
         self.settings = {}  # 设置
-        self.windows = []  # 打开的窗口
+        self.windows: list[QWidget] = []  # 打开的窗口
         self.log_path = None  # 日志文件路径
 
         self.btn_exit.clicked.connect(self.close)
@@ -154,8 +176,9 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
         self.actionhelpdoc.triggered.connect(self.show_helpdoc)
         self.actionlog.triggered.connect(self.show_log)
 
-        self.docx2pdf_thread = Docx2PdfWindow(rootpath=self.rootpath)
-        self.actiondocx2pdf.triggered.connect(self.docx2pdf_thread.show)
+        self.docx2pdf_win = Docx2PdfWindow(rootpath=self.rootpath)
+        self.actiondocx2pdf.triggered.connect(self.docx2pdf_win.show)
+        self.windows.append(self.docx2pdf_win)
         # self.docx2pdf_thread.start()
 
     def select_path(self):
@@ -191,7 +214,6 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
         # 关闭所有窗口
         for window in self.windows:
             window.close()
-        self.docx2pdf_thread.close()
         return super().closeEvent(event)
 
     def update_Setting(self):
@@ -317,7 +339,7 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
         self.about_win.setLayout(QVBoxLayout())
 
         label_about = QLabel(
-            text="EMI-Report\n\n版本：1.1.0\n\n作者：Lucas Li\n\n邮箱：Lucas_Li@acbel.com",
+            text="EMI-Report\n\n版本：1.2.0\n\n作者：Lucas Li\n\n邮箱：Lucas_Li@acbel.com",
             alignment=Qt.AlignCenter,
         )
         label_about.setWordWrap(True)
