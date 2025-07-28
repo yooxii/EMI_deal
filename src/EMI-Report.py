@@ -213,7 +213,10 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
     def closeEvent(self, event):
         # 关闭所有窗口
         for window in self.windows:
-            window.close()
+            try:
+                window.close()
+            except RuntimeError:
+                pass
         return super().closeEvent(event)
 
     def update_Setting(self):

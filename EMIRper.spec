@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['src/EMI-Report.py', 'src/ui/mainui.py', 'src/ui/res_rc.py'],
+    ['src/EMI-Report.py'],
     pathex=[],
     binaries=[],
     datas=[],
