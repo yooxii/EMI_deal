@@ -33,6 +33,7 @@ class ConvertThread(QThread):
     def __init__(self, docx_path=None):
         super().__init__()
         self.docx_path = docx_path
+        self.stop = False
 
     def run(self):
         if self.docx_path is None:
@@ -57,20 +58,27 @@ class ConvertThread(QThread):
         file_count = len(source_files)
         self.docx_count.emit(file_count)
         curr = 0
-        for file in source_files:
-            docx_file = os.path.join(docx_path, file)
-            pdf_file = os.path.join(docx_path, file.replace(".docx", ".pdf"))
+        self.docx_curr.emit(curr)
+        for file_ in source_files:
+            if self.stop:
+                break
+            docx_file = os.path.join(docx_path, file_)
+            pdf_file = os.path.join(docx_path, file_.replace(".docx", ".pdf"))
             try:
                 doc = word.Documents.Open(os.path.abspath(docx_file))
                 doc.SaveAs(os.path.abspath(pdf_file), FileFormat=17)
-                doc.Close(SaveChanges=0)
+                doc.Close(SaveChanges=False)
             except Exception as e:
                 logger.error(f"Error converting {docx_file} to PDF: {e}")
             curr = curr + 1
             self.docx_curr.emit(curr)
-        self.docx_end.emit()
         logger.info(f"Converted {curr} success/{file_count-curr} fail files to PDF.")
         word.Quit()
+        self.docx_end.emit()
+
+    def terminate(self):
+        self.stop = True
+        return super().terminate()
 
 
 class Docx2PdfWindow(QMainWindow, Ui_Docx2PdfWin, QtStyleTools):
@@ -80,17 +88,14 @@ class Docx2PdfWindow(QMainWindow, Ui_Docx2PdfWin, QtStyleTools):
         self.rootpath = (
             rootpath if rootpath else os.path.join(os.path.expanduser("~"), "Documents")
         )
-        self.docx2pdf_thread = ConvertThread()
+        self.docx2pdf_thread = None
+        self.path = ""
 
         self.btn_docxdir.clicked.connect(lambda: self.select_docx_path(is_dir=True))
         self.button_docxfile.clicked.connect(
             lambda: self.select_docx_path(is_dir=False)
         )
-        self.btn_docx2pdf.clicked.connect(self.docx2pdf_thread.run)
-        self.docx2pdf_thread.docx_count.connect(self.createStatusBar)
-        self.docx2pdf_thread.docx_curr.connect(self.updateStatusBar)
-        self.docx2pdf_thread.docx_end.connect(self.endStatus)
-        self.docx2pdf_thread.start()
+        self.btn_docx2pdf.clicked.connect(self.docx2pdfThread)
 
     def select_docx_path(self, is_dir=True):
         if is_dir:
@@ -102,7 +107,7 @@ class Docx2PdfWindow(QMainWindow, Ui_Docx2PdfWin, QtStyleTools):
             self.rootpath = os.path.split(path)[0]
             if path:
                 self.textEdit_docx.setText(path)
-                self.docx2pdf_thread.docx_path = path
+                self.path = path
         else:
             path = QFileDialog.getOpenFileName(
                 self,
@@ -113,7 +118,14 @@ class Docx2PdfWindow(QMainWindow, Ui_Docx2PdfWin, QtStyleTools):
             self.rootpath = os.path.split(os.path.dirname(path[0]))[0]
             if path:
                 self.textEdit_docx.setText(path[0])
-                self.docx2pdf_thread.docx_path = path[0]
+                self.path = path[0]
+
+    def docx2pdfThread(self):
+        self.docx2pdf_thread = ConvertThread(self.path)
+        self.docx2pdf_thread.docx_count.connect(self.createStatusBar)
+        self.docx2pdf_thread.docx_curr.connect(self.updateStatusBar)
+        self.docx2pdf_thread.docx_end.connect(self.endStatus)
+        self.docx2pdf_thread.start()
 
     @Slot(int)
     def createStatusBar(self, file_count):
@@ -140,7 +152,7 @@ class Docx2PdfWindow(QMainWindow, Ui_Docx2PdfWin, QtStyleTools):
         )
 
     def closeEvent(self, event):
-        self.deleteLater()
+        self.docx2pdf_thread.terminate()
         return super().closeEvent(event)
 
 
@@ -213,10 +225,7 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
     def closeEvent(self, event):
         # 关闭所有窗口
         for window in self.windows:
-            try:
-                window.close()
-            except RuntimeError:
-                pass
+            window.close()
         return super().closeEvent(event)
 
     def update_Setting(self):
@@ -466,7 +475,7 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
         if len(tmpp) > 1:
             ws["F5"] = uutname = tmpp[0] + "-" + tmpp[1]
         else:
-            ws["F5"] = directory
+            ws["F5"] = uutname = directory
 
         num_uut = len(set([it.split("-")[0] for it in res.keys()]))
 
@@ -563,6 +572,8 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
             data = it.split(" ")
             if len(data) > 10:
                 resdatas.append(data)
+        for i in range(len(resdatas)):
+            resdatas[i][0] = str(i + 1)
         res["datas"] = resdatas
         res_avg = sorted(res["datas"], key=lambda x: float(x[7]), reverse=False)
         # 对pk列升序排列
