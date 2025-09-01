@@ -152,8 +152,124 @@ class Docx2PdfWindow(QMainWindow, Ui_Docx2PdfWin, QtStyleTools):
         )
 
     def closeEvent(self, event):
-        self.docx2pdf_thread.terminate()
+        if hasattr(self, "docx2pdf_thread") and self.docx2pdf_thread is not None:
+            self.docx2pdf_thread.terminate()
         return super().closeEvent(event)
+
+
+class ProcessPdfThread(QThread):
+    progress_updated = Signal(int)  # 发送进度更新信号
+    processing_finished = Signal(dict)  # 发送处理完成信号
+    processing_error = Signal(str)  # 发送错误信息信号
+
+    def __init__(self, directory):
+        super().__init__()
+        self.directory = directory
+
+    def run(self):
+        try:
+            result = self.dealDirs(self.directory)
+            self.processing_finished.emit(result)
+        except Exception as e:
+            self.processing_error.emit(str(e))
+
+    def openPdf(self, path_pdf):
+        # 读取pdf文件，提取数据
+        with pdfplumber.open(path_pdf) as pdf:
+            text = pdf.pages[0].extract_text() + "\n" + pdf.pages[1].extract_text()
+            datas = [item for item in text.split("\n") if item]
+            return self.dealDatas(datas)
+
+    def dealDatas(self, datas):
+        res = {}
+        for data in datas[:20]:
+            tmp = data.split(" ")
+            if tmp[0] == "Serial":
+                res["Serial"] = tmp[-1]
+            elif tmp[0] == "Power":
+                res["Power"] = tmp[-1]
+            elif tmp[0] == "Load":
+                res["Load"] = tmp[-1]
+        resdatas = []
+        for it in datas[15:]:
+            data = it.split(" ")
+            if len(data) > 10:
+                resdatas.append(data)
+        for i in range(len(resdatas)):
+            resdatas[i][0] = str(i + 1)
+        res["datas"] = resdatas
+        res_avg = sorted(res["datas"], key=lambda x: float(x[7]), reverse=False)
+        # 对pk列升序排列
+        res_pk = sorted(res["datas"], key=lambda x: float(x[4]), reverse=False)
+        # 取avg和pk中最小的
+        res["datas"] = (
+            res_avg if float(res_avg[0][7]) <= float(res_pk[0][4]) else res_pk
+        )
+        return res
+
+    def dealDirs(self, modeldir):
+        res = {}
+        source_files = [f for f in os.listdir(modeldir) if f.endswith(".pdf")]
+
+        total_files = len(source_files)
+        for i, source_file in enumerate(source_files):
+            logger.info(f"FileName: {source_file}")
+            try:
+                res[source_file] = self.openPdf(os.path.join(modeldir, source_file))
+                # 发送进度更新信号
+                self.progress_updated.emit(i + 1)
+            except Exception as e:
+                logger.error(f"Error processing {source_file}: {e}")
+                continue
+        return res
+
+
+class ZipThread(QThread):
+    progress_updated = Signal(int)  # 发送进度更新信号
+    zip_finished = Signal(str)  # 压缩完成信号
+    zip_error = Signal(str)  # 压缩错误信号
+
+    def __init__(self, directory, zipname):
+        super().__init__()
+        self.directory = directory
+        self.zipname = zipname
+
+    def run(self):
+        self.zip_folder()
+
+    def zip_folder(self):
+        print("Zipping folder...")
+        try:
+            file_count = 0
+            pdf_files = []
+
+            # 先统计需要压缩的PDF文件
+            for rootPath, _, files in os.walk(self.directory):
+                for file in files:
+                    if file.endswith(".pdf"):
+                        file_count += 1
+                        pdf_files.append((rootPath, file))
+
+            # 执行压缩操作
+            print(f"Zipping {file_count} files...")
+            with zipfile.ZipFile(
+                f"{self.zipname}.zip", "w", zipfile.ZIP_LZMA
+            ) as harZip:
+                for i, (rootPath, file) in enumerate(pdf_files):
+                    if not file.endswith(".pdf"):
+                        continue
+                    file_path = os.path.join(rootPath, file)
+                    arcname = os.path.relpath(file_path, self.directory)
+                    harZip.write(file_path, arcname=arcname)
+
+                    # 发送进度更新信号
+                    self.progress_updated.emit(i + 1)
+
+            # 压缩完成，发送完成信号
+            self.zip_finished.emit(self.zipname)
+            print("Done!")
+        except Exception as e:
+            self.zip_error.emit(str(e))
 
 
 class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
@@ -161,12 +277,18 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
         super(EMIWindow, self).__init__(parent)
         self.setupUi(self)
 
+        self.init_var()
+        self.init_connect()
+
+        self.windows.append(self.docx2pdf_win)
+
+    def init_var(self):
         self.row_sn_ = 44  # 序列号所在行
         self.col_sn_ = 4  # 序列号所在列
         self.col_vol_ = 11  # 电压所在列
         self.col_line_ = 13  # 线性所在列
         self.col_load_ = 14  # 负荷所在列
-        self.row_end_ = 107  # 结束行
+        self.row_end_ = 103  # 结束行
         self.col_end_ = 27  # 结束列
         self.rootpath = None  # 根目录
 
@@ -178,20 +300,22 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
         self.settings = {}  # 设置
         self.windows: list[QWidget] = []  # 打开的窗口
         self.log_path = None  # 日志文件路径
+        self.save_file_name = None
 
+        self.res = None
+
+        self.docx2pdf_win = Docx2PdfWindow(rootpath=self.rootpath)
+
+    def init_connect(self):
         self.btn_exit.clicked.connect(self.close)
-        self.btn_deal.clicked.connect(self.deal_pdf)
+        self.btn_deal.clicked.connect(self.pdf2datas)
         self.btn_pathName.clicked.connect(self.select_path)
         self.btn_pathTemp.clicked.connect(self.select_path)
         self.actionsetting.triggered.connect(self.show_setting)
         self.actionabout.triggered.connect(self.show_about)
         self.actionhelpdoc.triggered.connect(self.show_helpdoc)
         self.actionlog.triggered.connect(self.show_log)
-
-        self.docx2pdf_win = Docx2PdfWindow(rootpath=self.rootpath)
         self.actiondocx2pdf.triggered.connect(self.docx2pdf_win.show)
-        self.windows.append(self.docx2pdf_win)
-        # self.docx2pdf_thread.start()
 
     def select_path(self):
         if self.sender() == self.btn_pathName:
@@ -379,42 +503,7 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
         self.helpdoc_win.show()
         self.windows.append(self.helpdoc_win)
 
-    def find_pdf(self, directory):
-        source_files = [f for f in os.listdir(directory) if f.endswith(".pdf")]
-        res = {}
-        file_count = len(source_files)
-
-        # 创建状态栏进度条
-        self.statusBar().showMessage("正在处理文件...")
-        self.progressBar = QProgressBar(self.statusBar_main)
-        self.progressBar.setMinimum(0)
-        self.progressBar.setMaximum(file_count)
-        self.progressBar.setValue(0)
-        self.statusBar().addPermanentWidget(self.progressBar)
-
-        for i, source_file in enumerate(source_files):
-            logger.info(f"FileName: {source_file}")
-            try:
-                res[source_file] = self.open_pdf(os.path.join(directory, source_file))
-            except Exception as e:
-                logger.error(f"Error processing {source_file}: {e}")
-                continue
-            value = self.progressBar.value() + 1
-            self.progressBar.setValue(value)
-            self.statusBar().showMessage(f"正在处理文件...{value}/{file_count}")
-
-        self.statusBar().removeWidget(self.progressBar)
-
-        return res
-
-    def open_pdf(self, path_pdf):
-        # 读取pdf文件，提取数据
-        with pdfplumber.open(path_pdf) as pdf:
-            text = pdf.pages[0].extract_text() + "\n" + pdf.pages[1].extract_text()
-            datas = [item for item in text.split("\n") if item]
-            return self.deal_datas(datas)
-
-    def deal_pdf(self):
+    def main_func(self, res):
         directory = self.textEdit_name.toPlainText()
         loadqty = self.textEdit_loadQTY.toPlainText()
         tmpFile = self.textEdit_tempFile.toPlainText()
@@ -456,8 +545,6 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
             logger.warning(f"No such directory: {directory}")
             QMessageBox.warning(self, "Warning", f"No such directory: {directory}")
             return
-
-        res = self.find_pdf(directory)
 
         for sub in ["\\", "/", "\\\\"]:
             if directory.endswith(sub):
@@ -543,46 +630,52 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
         SaveFile = re.sub(r"_\d\.xlsx", f"_{uutname}.xlsx", os.path.basename(tmpFile))
         wb.remove(ws_setup)
         wb.save(SaveFile)
+        self.save_file_name = SaveFile
         print("Done!")
         if self.settings_value["NeedZip"]:
             try:
                 self.zip_folder(directory, uutname)
-                if self.settings_value["AddZip"]:
-                    self.addZipToExcel(uutname, SaveFile)
             except Exception as e:
                 logger.error(f"Error during zipping or embedding: {e}")
                 QMessageBox.critical(
                     self, "Error", f"Error during zipping or embedding: {e}"
                 )
 
-        self.show_done(SaveFile)
+    def pdf2datas(self):
+        directory = self.textEdit_name.toPlainText()
+        source_files = [f for f in os.listdir(directory) if f.endswith(".pdf")]
+        self.file_count = len(source_files)
 
-    def deal_datas(self, datas):
-        res = {}
-        for data in datas[:20]:
-            tmp = data.split(" ")
-            if tmp[0] == "Serial":
-                res["Serial"] = tmp[-1]
-            elif tmp[0] == "Power":
-                res["Power"] = tmp[-1]
-            elif tmp[0] == "Load":
-                res["Load"] = tmp[-1]
-        resdatas = []
-        for it in datas[15:]:
-            data = it.split(" ")
-            if len(data) > 10:
-                resdatas.append(data)
-        for i in range(len(resdatas)):
-            resdatas[i][0] = str(i + 1)
-        res["datas"] = resdatas
-        res_avg = sorted(res["datas"], key=lambda x: float(x[7]), reverse=False)
-        # 对pk列升序排列
-        res_pk = sorted(res["datas"], key=lambda x: float(x[4]), reverse=False)
-        # 取avg和pk中最小的
-        res["datas"] = (
-            res_avg if float(res_avg[0][7]) <= float(res_pk[0][4]) else res_pk
-        )
-        return res
+        # 创建状态栏进度条
+        self.statusBar().showMessage("正在处理文件...")
+        self.progressBar = QProgressBar(self.statusBar_main)
+        self.progressBar.setMinimum(0)
+        self.progressBar.setMaximum(self.file_count)
+        self.progressBar.setValue(0)
+        self.statusBar().addPermanentWidget(self.progressBar)
+
+        # 启动处理线程
+        self.process_thread = ProcessPdfThread(directory)
+        self.process_thread.progress_updated.connect(self.updateProgressBar)
+        self.process_thread.processing_finished.connect(self.onProcessingFinished)
+        self.process_thread.processing_error.connect(self.onProcessingError)
+        self.process_thread.start()
+
+    def onProcessingFinished(self, result):
+        self.res = result
+        self.statusBar().removeWidget(self.progressBar)
+        # 继续后续处理
+        self.main_func(self.res)
+
+    def onProcessingError(self, error_msg):
+        logger.error(f"Processing error: {error_msg}")
+        QMessageBox.critical(self, "Error", f"Processing error: {error_msg}")
+        self.statusBar().removeWidget(self.progressBar)
+
+    def updateProgressBar(self):
+        value = self.progressBar.value() + 1
+        self.progressBar.setValue(value)
+        self.statusBar().showMessage(f"正在处理文件...{value}/{self.file_count}")
 
     def addZipToExcel(self, zipname, SaveFile):
         try:
@@ -622,43 +715,65 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
 
     def zip_folder(self, directory, zipname):
         print("Zipping folder...")
-        try:
-            file_count = 0
-            for rootPath, _, files in os.walk(directory):
-                for file in files:
-                    if file.endswith(".pdf"):
-                        file_count += 1
+        file_count = 0
+        for rootPath, _, files in os.walk(directory):
+            for _file in files:
+                if _file.endswith(".pdf"):
+                    file_count += 1
 
-            # 创建状态栏进度条
+        self.zip_thread = ZipThread(directory, zipname)
+        self.zip_thread.progress_updated.connect(self.updateZipProgressBar)
+        self.zip_thread.zip_finished.connect(self.onZipFinished)
+        self.zip_thread.zip_error.connect(self.onZipError)
+        self.zip_thread.start()
+
+    def updateZipProgressBar(self, value):
+        # 更新压缩进度条
+        if not hasattr(self, "zip_progressBar"):
+            # 创建压缩进度条
+            self.zip_progressBar = QProgressBar(self.statusBar_main)
+            self.zip_progressBar.setMinimum(0)
+
+            # 统计文件总数以设置最大值
+            directory = self.textEdit_name.toPlainText()
+            file_count = sum(
+                1
+                for rootPath, _, files in os.walk(directory)
+                for file in files
+                if file.endswith(".pdf")
+            )
+            self.zip_progressBar.setMaximum(file_count)
+            self.zip_progressBar.setValue(0)
+
             self.statusBar().showMessage("正在压缩文件...")
-            self.progressBar = QProgressBar(self.statusBar_main)
-            self.progressBar.setMinimum(0)
-            self.progressBar.setMaximum(file_count)
-            self.progressBar.setValue(0)
-            self.statusBar().addPermanentWidget(self.progressBar)
+            self.statusBar().addPermanentWidget(self.zip_progressBar)
 
-            print(f"Zipping {file_count} files...")
-            with zipfile.ZipFile(f"{zipname}.zip", "w", zipfile.ZIP_LZMA) as HarZip:
-                for rootPath, _, files in os.walk(directory):
-                    for file in files:
-                        if file.endswith(".pdf") == False:
-                            continue
-                        file_path = os.path.join(rootPath, file)
-                        arcname = os.path.relpath(file_path, directory)
-                        HarZip.write(file_path, arcname=arcname)
+        self.zip_progressBar.setValue(value)
+        self.statusBar().showMessage(
+            f"正在压缩文件...{value}/{self.zip_progressBar.maximum()}"
+        )
 
-                        value = self.progressBar.value() + 1
-                        self.progressBar.setValue(value)
-                        self.statusBar().showMessage(
-                            f"正在压缩文件...{value}/{file_count}"
-                        )
-
-            self.statusBar().removeWidget(self.progressBar)
-            self.progressBar.deleteLater()
+    def onZipFinished(self, zipname):
+        # 压缩完成处理
+        if hasattr(self, "zip_progressBar"):
+            self.statusBar().removeWidget(self.zip_progressBar)
+            del self.zip_progressBar
             self.statusBar().showMessage("压缩完成！")
-            print("Done!")
-        except Exception as e:
-            logger.error(f"Error zipping folder: {e}")
+
+        # 如果需要嵌入Excel，则继续执行
+        SaveFile = getattr(self, "save_file_name", None)  # 获取保存的文件名
+        if SaveFile and self.settings_value["AddZip"]:
+            self.addZipToExcel(zipname, SaveFile)
+
+        self.show_done(SaveFile)
+
+    def onZipError(self, error_msg):
+        # 压缩错误处理
+        logger.error(f"Error zipping folder: {error_msg}")
+        if hasattr(self, "zip_progressBar"):
+            self.statusBar().removeWidget(self.zip_progressBar)
+            del self.zip_progressBar
+        QMessageBox.critical(self, "Error", f"Error zipping folder: {error_msg}")
 
     def show_done(self, SaveFile):
         self.done_win = QWidget()
