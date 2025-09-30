@@ -720,6 +720,13 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
             for _file in files:
                 if _file.endswith(".pdf"):
                     file_count += 1
+        self.zip_progressBar = QProgressBar(self.statusBar_main)
+        self.zip_progressBar.setMaximum(file_count)
+        self.zip_progressBar.setMinimum(0)
+        self.zip_progressBar.setValue(0)
+
+        self.statusBar().showMessage("正在压缩文件...")
+        self.statusBar().addPermanentWidget(self.zip_progressBar)
 
         self.zip_thread = ZipThread(directory, zipname)
         self.zip_thread.progress_updated.connect(self.updateZipProgressBar)
@@ -729,24 +736,6 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
 
     def updateZipProgressBar(self, value):
         # 更新压缩进度条
-        if not hasattr(self, "zip_progressBar"):
-            # 创建压缩进度条
-            self.zip_progressBar = QProgressBar(self.statusBar_main)
-            self.zip_progressBar.setMinimum(0)
-
-            # 统计文件总数以设置最大值
-            directory = self.textEdit_name.toPlainText()
-            file_count = sum(
-                1
-                for rootPath, _, files in os.walk(directory)
-                for file in files
-                if file.endswith(".pdf")
-            )
-            self.zip_progressBar.setMaximum(file_count)
-            self.zip_progressBar.setValue(0)
-
-            self.statusBar().showMessage("正在压缩文件...")
-            self.statusBar().addPermanentWidget(self.zip_progressBar)
 
         self.zip_progressBar.setValue(value)
         self.statusBar().showMessage(
