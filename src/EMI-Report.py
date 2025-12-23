@@ -9,8 +9,8 @@ import win32com.client as win32
 import pdfplumber
 import logging
 
-from ui.ui_EMC import *
-from ui.ui_docx2pdf import Ui_Docx2PdfWin
+from gui.ui_docx2pdf import Ui_Docx2PdfWin
+from gui.mainWin import *
 from PySide6.QtWidgets import QProgressBar, QMessageBox, QCheckBox, QDialog, QFileDialog
 from PySide6.QtCore import QThread, Signal, Slot
 from qt_material import QtStyleTools, apply_stylesheet
@@ -272,15 +272,12 @@ class ZipThread(QThread):
             self.zip_error.emit(str(e))
 
 
-class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
+class EMIWindow(MainWindow, QtStyleTools):
     def __init__(self, parent=None):
-        super(EMIWindow, self).__init__(parent)
-        self.setupUi(self)
+        super().__init__()
 
         self.init_var()
         self.init_connect()
-
-        self.windows.append(self.docx2pdf_win)
 
     def init_var(self):
         self.row_sn_ = 44  # 序列号所在行
@@ -304,47 +301,47 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
 
         self.res = None
 
-        self.docx2pdf_win = Docx2PdfWindow(rootpath=self.rootpath)
-
     def init_connect(self):
         self.btn_exit.clicked.connect(self.close)
-        self.btn_deal.clicked.connect(self.pdf2datas)
-        self.btn_pathName.clicked.connect(self.select_path)
-        self.btn_pathTemp.clicked.connect(self.select_path)
-        self.actionsetting.triggered.connect(self.show_setting)
-        self.actionabout.triggered.connect(self.show_about)
-        self.actionhelpdoc.triggered.connect(self.show_helpdoc)
-        self.actionlog.triggered.connect(self.show_log)
-        self.actiondocx2pdf.triggered.connect(self.docx2pdf_win.show)
+        self.btn_start.clicked.connect(self.getpdfdatas)
+        self.btnfile_template.clicked.connect(self.select_templatepath)
+        self.btnfile_model.clicked.connect(self.select_modelpath)
+        self.btn_getdetail.clicked.connect(self.get_testdetail)
+        self.action_sets.triggered.connect(self.show_setting)
+        self.action_about.triggered.connect(self.show_about)
+        self.action_doc.triggered.connect(self.show_helpdoc)
+        self.action_log.triggered.connect(self.show_log)
+        self.action_topdf.triggered.connect(self.show_docx2pdf)
 
-    def select_path(self):
-        if self.sender() == self.btn_pathName:
-            path = QFileDialog.getExistingDirectory(
-                self,
-                "选择原始PDF文件所在目录",
-                dir=(
-                    self.rootpath
-                    if self.rootpath
-                    else os.path.join(os.path.expanduser("~"), "Documents")
-                ),
-            )
-            self.rootpath = os.path.split(path)[0]
-            if path:
-                self.textEdit_name.setText(path)
-        elif self.sender() == self.btn_pathTemp:
-            path = QFileDialog.getOpenFileName(
-                self,
-                "选择模板",
-                filter="Excel文件 (*.xlsx)",
-                dir=(
-                    self.rootpath
-                    if self.rootpath
-                    else os.path.join(os.path.expanduser("~"), "Documents")
-                ),
-            )
-            self.rootpath = os.path.split(os.path.dirname(path[0]))[0]
-            if path:
-                self.textEdit_tempFile.setText(path[0])
+    def select_modelpath(self):
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "选择测试数据所在目录",
+            dir=(
+                self.rootpath
+                if self.rootpath
+                else os.path.join(os.path.expanduser("~"), "Documents")
+            ),
+        )
+        self.rootpath = os.path.split(path)[0]
+        if path:
+            self.lineEdit_model.setText(path)
+
+    def select_templatepath(self):
+        path = QFileDialog.getOpenFileName(
+            self,
+            "选择模板",
+            filter="Excel文件 (*.xlsx)",
+            dir=(
+                self.rootpath
+                if self.rootpath
+                else os.path.join(os.path.expanduser("~"), "Documents")
+            ),
+        )
+        self.rootpath = os.path.split(os.path.dirname(path[0]))[0]
+        if path:
+            self.lineEdit_template.setText(path[0])
+            return path[0]
 
     def closeEvent(self, event):
         # 关闭所有窗口
@@ -356,6 +353,24 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
         for key, _ in self.settings.items():
             self.settings_value[key] = self.settings[key].isChecked()
         logger.info(f"Setting updated: {self.settings_value}")
+
+    def export_log(self):
+        export_path = QFileDialog.getSaveFileName(
+            self, "导出日志", filter="Log Files (*.log)"
+        )
+        with open(self.log_path, "r") as sf:
+            with open(export_path, "w") as f:
+                f.write(sf.read())
+
+    def clear_log(self):
+        open(self.log_path, "w").close()
+        self.Text_log.clear()
+        logger.info("Log cleared.")
+
+    def show_docx2pdf(self):
+        self.docx2pdf_win = Docx2PdfWindow(rootpath=self.rootpath)
+        self.windows.append(self.docx2pdf_win)
+        self.docx2pdf_win.show()
 
     def show_setting(self):
         self.setting_win = QWidget()
@@ -418,18 +433,42 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
         self.setting_win.show()
         self.windows.append(self.setting_win)
 
-    def export_log(self):
-        export_path = QFileDialog.getSaveFileName(
-            self, "导出日志", filter="Log Files (*.log)"
-        )
-        with open(self.log_path, "r") as sf:
-            with open(export_path, "w") as f:
-                f.write(sf.read())
+    def show_done(self, SaveFile):
+        self.done_win = QWidget()
+        self.done_win.setWindowTitle("完成!")
+        icon = QIcon(":/emipdf/acbel -1.jpg")
+        self.done_win.setWindowIcon(icon)
+        self.done_win.resize(600, 200)
+        self.done_win.setLayout(QVBoxLayout())
 
-    def clear_log(self):
-        open(self.log_path, "w").close()
-        self.Text_log.clear()
-        logger.info("Log cleared.")
+        label1 = QLabel(
+            f'文件已保存为 "{os.path.abspath(SaveFile)}"', alignment=Qt.AlignLeft
+        )
+        self.done_win.layout().addWidget(label1)
+
+        label2_text = (
+            "您还需要进行下列步骤以完成报告：\n"
+            "\t1. 填入日期，测试者等表头信息，注意是MP还是MVT.\n"
+            "\t2. 千万注意限值标准是否对应，默认Class B.\n"
+            "\t3. 插入测试图片和压缩包.\n"
+            "\t4. 整理表格，如果有多余项请按需求删除."
+        )
+        label2 = QLabel(text=label2_text, alignment=Qt.AlignLeft)
+        label2.setWordWrap(True)
+        self.done_win.layout().addWidget(label2)
+
+        label3 = QLabel(
+            "---------------请确认以上步骤都已完成，按OK退出。---------------",
+            alignment=Qt.AlignLeft,
+        )
+        self.done_win.layout().addWidget(label3)
+
+        ok_button = QPushButton("OK")
+        ok_button.clicked.connect(self.done_win.hide)
+        self.done_win.layout().addWidget(ok_button)
+
+        self.done_win.show()
+        self.windows.append(self.done_win)
 
     def show_log(self):
         self.log_win = QDialog()
@@ -503,13 +542,9 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
         self.helpdoc_win.show()
         self.windows.append(self.helpdoc_win)
 
-    def main_func(self, res):
-        directory = self.textEdit_name.toPlainText()
-        loadqty = self.textEdit_loadQTY.toPlainText()
-        tmpFile = self.textEdit_tempFile.toPlainText()
-
-        loadqty = re.match(r"\d+", loadqty).group() if loadqty else "3"
-
+    def open_template(self):
+        tmpFile = self.lineEdit_template.text()
+        loadqty = self.spin_qty.value()
         # 检查是否存在模板文件，默认3个负载
         if not tmpFile or tmpFile == "":
             tmpFile = f"2.1 Conducted EMI Measurement_{loadqty}.xlsx"
@@ -517,6 +552,11 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
                 logger.warning(f"Unexpected load quantity: {loadqty}, defaulting to 3.")
                 tmpFile = "2.1 Conducted EMI Measurement_3.xlsx"
             tmpFile = "template/" + tmpFile
+
+        if not os.path.exists(tmpFile):
+            tmpFile = self.select_templatepath()
+        else:
+            self.lineEdit_template.setText(os.path.abspath(tmpFile))
 
         try:
             wb = xl.load_workbook(tmpFile)
@@ -528,7 +568,25 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
             logger.error(f"Error opening template file: {e}")
             QMessageBox.warning(self, "Error", f"Error opening template file: {e}")
             return
+        return wb
 
+    def get_testdetail(self):
+        wb = self.open_template()
+        if wb is None:
+            return
+        ws = wb["Conducted EMI"]
+        RpDetail = ws.cell(8, 6).value
+        self.text_detail.setText(RpDetail)
+        wb.Close()
+
+    def main_func(self, res):
+        directory = self.lineEdit_model.text()
+        loadqty = self.spin_qty.value()
+        tmpFile = self.lineEdit_template.text()
+
+        wb = self.open_template()
+        if wb is None:
+            return
         ws_setup = wb["Setup"]
 
         self.row_sn_ = ws_setup.cell(row=1, column=2).value
@@ -546,14 +604,9 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
             QMessageBox.warning(self, "Warning", f"No such directory: {directory}")
             return
 
-        for sub in ["\\", "/", "\\\\"]:
-            if directory.endswith(sub):
-                directory = directory[:-1]
-            if directory.find(sub) != -1:
-                root_dir = directory
-                directory = directory.split(sub)[-1]
-                root_dir = root_dir.replace(directory, "") + sub
-                break
+        directory = os.path.realpath(directory)
+        root_dir = os.path.dirname(directory)
+        directory = os.path.basename(directory)
 
         os.chdir(root_dir)  # 改变工作目录
 
@@ -563,25 +616,36 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
             ws["F5"] = uutname = tmpp[0] + "-" + tmpp[1]
         else:
             ws["F5"] = uutname = directory
+        # 测试日期
+        ws["F6"] = self.date_test.date().toString("yyyy/MM/dd")
+        # 工令
+        ws["F44"] = self.lineEdit_workerno.text()
+        # 版本
+        ws["H44"] = self.lineEdit_rev.text()
+        # D/C
+        ws["I44"] = self.lineEdit_week.text()
+        # 测试detail
+        ws["F8"] = self.text_detail.toPlainText()
 
-        num_uut = len(set([it.split("-")[0] for it in res.keys()]))
+        test_count = len(set([it.split("-")[0] for it in res.keys()]))
 
-        if num_uut > 5:
-            logger.warning(f"Number of Load is too many! {num_uut}")
+        if test_count > 5:
+            logger.warning(f"Number of Load is too many! {test_count}")
             QMessageBox.warning(
-                self, "Warning", f"Number of Load is too many! {num_uut}"
+                self, "Warning", f"Number of Load is too many! {test_count}"
             )
             return
 
         # 处理合并单元格
         merged_cells = list(ws.merged_cells)
         for cell in merged_cells:
-            if cell.min_row == self.row_sn_ + int(loadqty) * 4 * num_uut:
+            if cell.min_row == self.row_sn_ + int(loadqty) * 4 * test_count:
                 ws.unmerge_cells(cell.coord)
 
         # 删去多余的行
         ws.delete_rows(
-            self.row_sn_ + int(loadqty) * 4 * num_uut, int(loadqty) * 4 * (5 - num_uut)
+            self.row_sn_ + int(loadqty) * 4 * test_count,
+            int(loadqty) * 4 * (5 - test_count),
         )
         self.row_end_ = ws.max_row - 4
         logger.info(f"Max row after deletion: {self.row_end_}")
@@ -641,8 +705,8 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
                     self, "Error", f"Error during zipping or embedding: {e}"
                 )
 
-    def pdf2datas(self):
-        directory = self.textEdit_name.toPlainText()
+    def getpdfdatas(self):
+        directory = self.lineEdit_model.text()
         source_files = [f for f in os.listdir(directory) if f.endswith(".pdf")]
         self.file_count = len(source_files)
 
@@ -764,49 +828,12 @@ class EMIWindow(QMainWindow, Ui_MainWindow, QtStyleTools):
             del self.zip_progressBar
         QMessageBox.critical(self, "Error", f"Error zipping folder: {error_msg}")
 
-    def show_done(self, SaveFile):
-        self.done_win = QWidget()
-        self.done_win.setWindowTitle("完成!")
-        icon = QIcon(":/emipdf/acbel -1.jpg")
-        self.done_win.setWindowIcon(icon)
-        self.done_win.resize(600, 200)
-        self.done_win.setLayout(QVBoxLayout())
-
-        label1 = QLabel(
-            f'文件已保存为 "{os.path.abspath(SaveFile)}"', alignment=Qt.AlignLeft
-        )
-        self.done_win.layout().addWidget(label1)
-
-        label2_text = (
-            "您还需要进行下列步骤以完成报告：\n"
-            "\t1. 填入日期，测试者等表头信息，注意是MP还是MVT.\n"
-            "\t2. 千万注意限值标准是否对应，默认Class B.\n"
-            "\t3. 插入测试图片和压缩包.\n"
-            "\t4. 整理表格，如果有多余项请按需求删除."
-        )
-        label2 = QLabel(text=label2_text, alignment=Qt.AlignLeft)
-        label2.setWordWrap(True)
-        self.done_win.layout().addWidget(label2)
-
-        label3 = QLabel(
-            "---------------请确认以上步骤都已完成，按OK退出。---------------",
-            alignment=Qt.AlignLeft,
-        )
-        self.done_win.layout().addWidget(label3)
-
-        ok_button = QPushButton("OK")
-        ok_button.clicked.connect(self.done_win.hide)
-        self.done_win.layout().addWidget(ok_button)
-
-        self.done_win.show()
-        self.windows.append(self.done_win)
-
 
 if __name__ == "__main__":
     app = QApplication()
     win = EMIWindow()
 
-    apply_stylesheet(app, theme="dark_teal.xml")
+    # apply_stylesheet(app, theme="dark_teal.xml")
     win.show()
     sys.exit(app.exec())
 

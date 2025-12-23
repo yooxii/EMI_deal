@@ -18,7 +18,7 @@ from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
 from PySide6.QtWidgets import (QApplication, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QPushButton, QSizePolicy,
     QSpacerItem, QStatusBar, QWidget)
-import ui.doc_rc
+import gui.doc_rc
 
 class Ui_Docx2PdfWin(object):
     def setupUi(self, Docx2PdfWin):

@@ -19,7 +19,7 @@ from PySide6.QtGui import (QAction, QBrush, QColor, QConicalGradient,
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QMainWindow,
     QMenu, QMenuBar, QPushButton, QSizePolicy,
     QStatusBar, QTextEdit, QVBoxLayout, QWidget)
-import ui.res_rc as res_rc
+import gui.res_rc as res_rc
 
 class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
