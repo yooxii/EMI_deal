@@ -56,9 +56,56 @@ from PySide6.QtWidgets import (
 )
 import os
 import sys
+import logging
 
+logger = logging.getLogger(__name__)
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 import gui.res_rc as res_rc
+
+
+class HoverLineEdit(QLineEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # 创建一个用于显示预览的小部件
+        self.preview_widget = QWidget()
+        # self.preview_widget.setWindowFlags(Qt.WindowType.Popup)
+        self.preview_widget.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        layout = QVBoxLayout()
+        self.preview_label = QLabel(self.preview_widget)
+        layout.addWidget(self.preview_label)
+        self.preview_widget.setLayout(layout)
+
+    def enterEvent(self, event):
+        # 当鼠标进入QLineEdit时触发
+        self.show_preview()
+
+    def leaveEvent(self, event):
+        # 当鼠标离开QLineEdit时隐藏预览
+        self.hide_preview()
+
+    def show_preview(self):
+        # 从 QLineEdit 获取图片路径
+        image_path = self.text().strip()
+        if not image_path:
+            return
+
+        # 加载并显示图片
+        pixmap = QPixmap(image_path)
+        if not pixmap.isNull():
+            self.preview_label.setPixmap(
+                pixmap.scaledToWidth(400, Qt.SmoothTransformation)
+            )  # 调整大小方便查看
+
+            pos = self.mapToGlobal(self.geometry().topRight())
+            self.preview_widget.move(pos.x(), pos.y())
+            self.preview_widget.show()
+        else:
+            logger.error(f"无法加载图片: {image_path}")
+
+    def hide_preview(self):
+        # 隐藏图片预览
+        self.preview_widget.hide()
 
 
 class MainWindow(QMainWindow):
@@ -111,6 +158,7 @@ class MainWindow(QMainWindow):
         self.lineEdit_template = QLineEdit()
         layout_temp.addWidget(self.lineEdit_template)
         self.btnfile_template = QPushButton(self.tr("浏览"))
+        self.btnfile_template.setMaximumWidth(40)
         self.btnfile_template.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         layout_temp.addWidget(self.btnfile_template)
         layout_input.addLayout(layout_temp)
@@ -120,6 +168,7 @@ class MainWindow(QMainWindow):
         self.lineEdit_model = QLineEdit()
         layout_model.addWidget(self.lineEdit_model)
         self.btnfile_model = QPushButton(self.tr("浏览"))
+        self.btnfile_model.setMaximumWidth(40)
         self.btnfile_model.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         layout_model.addWidget(self.btnfile_model)
         layout_input.addLayout(layout_model)
@@ -176,11 +225,24 @@ class MainWindow(QMainWindow):
         layout_workerno.addWidget(self.lineEdit_workerno)
         boxinfo_layout.addLayout(layout_workerno, 2, 2, 1, 2)
 
+        layout_img = QHBoxLayout()
+        layout_img.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.label_img = QLabel(self.tr("测试图片："))
+        self.label_img.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        layout_img.addWidget(self.label_img)
+        self.lineEdit_img = HoverLineEdit()
+        layout_img.addWidget(self.lineEdit_img)
+        self.btnfile_img = QPushButton(self.tr("选择"))
+        self.btnfile_img.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btnfile_img.setMaximumWidth(40)
+        layout_img.addWidget(self.btnfile_img)
+        boxinfo_layout.addLayout(layout_img, 3, 1, 1, 3)
+
         # 添加分隔线
         line1 = QFrame()
         line1.setFrameShape(QFrame.Shape.HLine)
         line1.setFrameShadow(QFrame.Shadow.Sunken)
-        boxinfo_layout.addWidget(line1, 3, 1, 1, 3)
+        boxinfo_layout.addWidget(line1, 4, 1, 1, 3)
 
         layout_detail = QVBoxLayout()
         layout_detail.setAlignment(Qt.AlignmentFlag.AlignLeft)
@@ -202,7 +264,7 @@ class MainWindow(QMainWindow):
         layout_detail.addLayout(layout_detail_1)
         self.text_detail = QTextEdit()
         layout_detail.addWidget(self.text_detail)
-        boxinfo_layout.addLayout(layout_detail, 4, 1, 1, 3)
+        boxinfo_layout.addLayout(layout_detail, 5, 1, 1, 3)
 
         layout_input.addWidget(box_otherinfo)
 
@@ -253,6 +315,79 @@ class MainWindow(QMainWindow):
         self.mainMenuBar.addMenu(self.menuHelp)
 
         self.setMenuBar(self.mainMenuBar)
+
+    def show_about(self):
+        self.about_win = QWidget(self)
+        self.about_win.setWindowTitle("关于")
+        icon = QIcon()
+        icon.addFile(":/emipdf/acbel -1.jpg", QSize(), QIcon.Normal, QIcon.Off)
+        self.about_win.setWindowIcon(icon)
+        self.about_win.resize(300, 200)
+        self.about_win.setStyleSheet("QLabel { font-size: 15px; }")
+        self.about_win.setLayout(QVBoxLayout())
+
+        label_about = QLabel(
+            text="EMI-Report\n\n版本：1.2.0\n\n作者：Lucas Li\n\n邮箱：Lucas_Li@acbel.com",
+            alignment=Qt.AlignCenter,
+        )
+        label_about.setWordWrap(True)
+        self.about_win.layout().addWidget(label_about)
+
+        self.about_win.show()
+
+    def show_helpdoc(self):
+        self.helpdoc_win = QWidget(self)
+        self.helpdoc_win.setWindowTitle("帮助文档")
+        icon = QIcon()
+        icon.addFile(":/emipdf/acbel -1.jpg", QSize(), QIcon.Normal, QIcon.Off)
+        self.helpdoc_win.setWindowIcon(icon)
+        self.helpdoc_win.resize(800, 600)
+        self.helpdoc_win.setStyleSheet("QLabel { font-size: 15px; }")
+        self.helpdoc_win.setLayout(QVBoxLayout())
+
+        label_helpdoc = QLabel(
+            text="EMI-Report\n\n待补充...\n\n", alignment=Qt.AlignLeft
+        )
+        label_helpdoc.setWordWrap(True)
+        self.helpdoc_win.layout().addWidget(label_helpdoc)
+
+        self.helpdoc_win.show()
+
+    def show_done(self, SaveFile):
+        self.done_win = QWidget(self)
+        self.done_win.setWindowTitle("完成!")
+        icon = QIcon(":/emipdf/acbel -1.jpg")
+        self.done_win.setWindowIcon(icon)
+        self.done_win.resize(600, 200)
+        self.done_win.setLayout(QVBoxLayout())
+
+        label1 = QLabel(
+            f'文件已保存为 "{os.path.abspath(SaveFile)}"', alignment=Qt.AlignLeft
+        )
+        self.done_win.layout().addWidget(label1)
+
+        label2_text = (
+            "您还需要进行下列步骤以完成报告：\n"
+            "\t1. 填入日期，测试者等表头信息，注意是MP还是MVT.\n"
+            "\t2. 千万注意限值标准是否对应，默认Class B.\n"
+            "\t3. 插入测试图片和压缩包.\n"
+            "\t4. 整理表格，如果有多余项请按需求删除."
+        )
+        label2 = QLabel(text=label2_text, alignment=Qt.AlignLeft)
+        label2.setWordWrap(True)
+        self.done_win.layout().addWidget(label2)
+
+        label3 = QLabel(
+            "---------------请确认以上步骤都已完成，按OK退出。---------------",
+            alignment=Qt.AlignLeft,
+        )
+        self.done_win.layout().addWidget(label3)
+
+        ok_button = QPushButton("OK")
+        ok_button.clicked.connect(self.done_win.close)
+        self.done_win.layout().addWidget(ok_button)
+
+        self.done_win.show()
 
 
 if __name__ == "__main__":

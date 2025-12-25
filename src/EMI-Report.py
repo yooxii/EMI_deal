@@ -5,15 +5,24 @@ import re
 import sys
 import zipfile
 import openpyxl as xl
+from openpyxl.drawing import image
 import win32com.client as win32
 import pdfplumber
 import logging
 
 from gui.ui_docx2pdf import Ui_Docx2PdfWin
 from gui.mainWin import *
-from PySide6.QtWidgets import QProgressBar, QMessageBox, QCheckBox, QDialog, QFileDialog
+from PySide6.QtWidgets import (
+    QProgressBar,
+    QMessageBox,
+    QCheckBox,
+    QDialog,
+    QFileDialog,
+    QGraphicsScene,
+    QGraphicsView,
+    QGraphicsPixmapItem,
+)
 from PySide6.QtCore import QThread, Signal, Slot
-from qt_material import QtStyleTools, apply_stylesheet
 
 # 日志配置
 logName = "DealPdf"
@@ -81,7 +90,7 @@ class ConvertThread(QThread):
         return super().terminate()
 
 
-class Docx2PdfWindow(QMainWindow, Ui_Docx2PdfWin, QtStyleTools):
+class Docx2PdfWindow(QMainWindow, Ui_Docx2PdfWin):
     def __init__(self, parent=None, rootpath=None):
         super().__init__(parent)
         self.setupUi(self)
@@ -272,7 +281,7 @@ class ZipThread(QThread):
             self.zip_error.emit(str(e))
 
 
-class EMIWindow(MainWindow, QtStyleTools):
+class EMIWindow(MainWindow):
     def __init__(self, parent=None):
         super().__init__()
 
@@ -306,6 +315,7 @@ class EMIWindow(MainWindow, QtStyleTools):
         self.btn_start.clicked.connect(self.getpdfdatas)
         self.btnfile_template.clicked.connect(self.select_templatepath)
         self.btnfile_model.clicked.connect(self.select_modelpath)
+        self.btnfile_img.clicked.connect(self.select_imgpath)
         self.btn_getdetail.clicked.connect(self.get_testdetail)
         self.action_sets.triggered.connect(self.show_setting)
         self.action_about.triggered.connect(self.show_about)
@@ -342,6 +352,20 @@ class EMIWindow(MainWindow, QtStyleTools):
         if path:
             self.lineEdit_template.setText(path[0])
             return path[0]
+
+    def select_imgpath(self):
+        path = QFileDialog.getOpenFileName(
+            self,
+            "选择图片",
+            filter="Image Files (*.png *.jpg *.jpeg *.bmp)",
+            dir=(
+                self.rootpath
+                if self.rootpath
+                else os.path.join(os.path.expanduser("~"), "Documents")
+            ),
+        )
+        if path:
+            self.lineEdit_img.setText(path[0])
 
     def closeEvent(self, event):
         # 关闭所有窗口
@@ -433,43 +457,6 @@ class EMIWindow(MainWindow, QtStyleTools):
         self.setting_win.show()
         self.windows.append(self.setting_win)
 
-    def show_done(self, SaveFile):
-        self.done_win = QWidget()
-        self.done_win.setWindowTitle("完成!")
-        icon = QIcon(":/emipdf/acbel -1.jpg")
-        self.done_win.setWindowIcon(icon)
-        self.done_win.resize(600, 200)
-        self.done_win.setLayout(QVBoxLayout())
-
-        label1 = QLabel(
-            f'文件已保存为 "{os.path.abspath(SaveFile)}"', alignment=Qt.AlignLeft
-        )
-        self.done_win.layout().addWidget(label1)
-
-        label2_text = (
-            "您还需要进行下列步骤以完成报告：\n"
-            "\t1. 填入日期，测试者等表头信息，注意是MP还是MVT.\n"
-            "\t2. 千万注意限值标准是否对应，默认Class B.\n"
-            "\t3. 插入测试图片和压缩包.\n"
-            "\t4. 整理表格，如果有多余项请按需求删除."
-        )
-        label2 = QLabel(text=label2_text, alignment=Qt.AlignLeft)
-        label2.setWordWrap(True)
-        self.done_win.layout().addWidget(label2)
-
-        label3 = QLabel(
-            "---------------请确认以上步骤都已完成，按OK退出。---------------",
-            alignment=Qt.AlignLeft,
-        )
-        self.done_win.layout().addWidget(label3)
-
-        ok_button = QPushButton("OK")
-        ok_button.clicked.connect(self.done_win.hide)
-        self.done_win.layout().addWidget(ok_button)
-
-        self.done_win.show()
-        self.windows.append(self.done_win)
-
     def show_log(self):
         self.log_win = QDialog()
         self.log_win.setWindowTitle("日志")
@@ -503,52 +490,13 @@ class EMIWindow(MainWindow, QtStyleTools):
         self.log_win.show()
         self.windows.append(self.log_win)
 
-    def show_about(self):
-        self.about_win = QWidget()
-        self.about_win.setWindowTitle("关于")
-        icon = QIcon()
-        icon.addFile(":/emipdf/acbel -1.jpg", QSize(), QIcon.Normal, QIcon.Off)
-        self.about_win.setWindowIcon(icon)
-        self.about_win.resize(300, 200)
-        self.about_win.setStyleSheet("QLabel { font-size: 15px; }")
-        self.about_win.setLayout(QVBoxLayout())
-
-        label_about = QLabel(
-            text="EMI-Report\n\n版本：1.2.0\n\n作者：Lucas Li\n\n邮箱：Lucas_Li@acbel.com",
-            alignment=Qt.AlignCenter,
-        )
-        label_about.setWordWrap(True)
-        self.about_win.layout().addWidget(label_about)
-
-        self.about_win.show()
-        self.windows.append(self.about_win)
-
-    def show_helpdoc(self):
-        self.helpdoc_win = QWidget()
-        self.helpdoc_win.setWindowTitle("帮助文档")
-        icon = QIcon()
-        icon.addFile(":/emipdf/acbel -1.jpg", QSize(), QIcon.Normal, QIcon.Off)
-        self.helpdoc_win.setWindowIcon(icon)
-        self.helpdoc_win.resize(800, 600)
-        self.helpdoc_win.setStyleSheet("QLabel { font-size: 15px; }")
-        self.helpdoc_win.setLayout(QVBoxLayout())
-
-        label_helpdoc = QLabel(
-            text="EMI-Report\n\n待补充...\n\n", alignment=Qt.AlignLeft
-        )
-        label_helpdoc.setWordWrap(True)
-        self.helpdoc_win.layout().addWidget(label_helpdoc)
-
-        self.helpdoc_win.show()
-        self.windows.append(self.helpdoc_win)
-
     def open_template(self):
         tmpFile = self.lineEdit_template.text()
         loadqty = self.spin_qty.value()
         # 检查是否存在模板文件，默认3个负载
         if not tmpFile or tmpFile == "":
             tmpFile = f"2.1 Conducted EMI Measurement_{loadqty}.xlsx"
-            if loadqty not in ["3", "4"]:
+            if loadqty not in [3, 4]:
                 logger.warning(f"Unexpected load quantity: {loadqty}, defaulting to 3.")
                 tmpFile = "2.1 Conducted EMI Measurement_3.xlsx"
             tmpFile = "template/" + tmpFile
@@ -577,7 +525,7 @@ class EMIWindow(MainWindow, QtStyleTools):
         ws = wb["Conducted EMI"]
         RpDetail = ws.cell(8, 6).value
         self.text_detail.setText(RpDetail)
-        wb.Close()
+        wb.close()
 
     def main_func(self, res):
         directory = self.lineEdit_model.text()
@@ -626,6 +574,15 @@ class EMIWindow(MainWindow, QtStyleTools):
         ws["I44"] = self.lineEdit_week.text()
         # 测试detail
         ws["F8"] = self.text_detail.toPlainText()
+        # 放置图片
+        img_path = self.lineEdit_img.text()
+        if os.path.exists(img_path):
+            img_path = os.path.realpath(img_path)
+            img = image.Image(img_path)
+            src_height = img.height
+            img.height = img_height = 250
+            img.width = int(img.width * img_height / src_height)
+            ws.add_image(img, "C27")
 
         test_count = len(set([it.split("-")[0] for it in res.keys()]))
 
@@ -639,13 +596,13 @@ class EMIWindow(MainWindow, QtStyleTools):
         # 处理合并单元格
         merged_cells = list(ws.merged_cells)
         for cell in merged_cells:
-            if cell.min_row == self.row_sn_ + int(loadqty) * 4 * test_count:
+            if cell.min_row == self.row_sn_ + loadqty * 4 * test_count:
                 ws.unmerge_cells(cell.coord)
 
         # 删去多余的行
         ws.delete_rows(
-            self.row_sn_ + int(loadqty) * 4 * test_count,
-            int(loadqty) * 4 * (5 - test_count),
+            self.row_sn_ + loadqty * 4 * test_count,
+            loadqty * 4 * (5 - test_count),
         )
         self.row_end_ = ws.max_row - 4
         logger.info(f"Max row after deletion: {self.row_end_}")
@@ -658,18 +615,18 @@ class EMIWindow(MainWindow, QtStyleTools):
                 ws.cell(row=row_sn, column=self.col_sn_).value is not None
                 and ws.cell(row=row_sn, column=self.col_sn_).value != datas["Serial"]
             ):
-                row_sn += int(loadqty) * 4
+                row_sn += loadqty * 4
             if ws.cell(row=row_sn, column=self.col_sn_).value is None:
                 ws.cell(row=row_sn, column=self.col_sn_).value = datas["Serial"]
 
             row_vol = row_sn + (
-                int(loadqty) * 2
+                loadqty * 2
                 if ws.cell(row=row_sn, column=self.col_vol_).value
                 != int(re.match(r"\d+", datas["Power"]).group())
                 else 0
             )
             row_load = row_vol
-            while row_load < row_vol + (int(loadqty) * 2) and int(
+            while row_load < row_vol + (loadqty * 2) and int(
                 ws.cell(row=row_load, column=self.col_load_).value * 100
             ) != int(re.match(r"\d+", datas["Load"]).group()):
                 row_load += 2
