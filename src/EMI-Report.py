@@ -10,19 +10,25 @@ import win32com.client as win32
 import pdfplumber
 import logging
 
-from gui.ui_docx2pdf import Ui_Docx2PdfWin
-from gui.mainWin import *
+from gui.ui_docx2pdf import Docx2PdfWindow
+from gui.ui_wordreplace import WordReplace
+from gui.mainWin import MainWindow
 from PySide6.QtWidgets import (
+    QApplication,
+    QWidget,
     QProgressBar,
     QMessageBox,
     QCheckBox,
+    QPushButton,
     QDialog,
     QFileDialog,
-    QGraphicsScene,
-    QGraphicsView,
-    QGraphicsPixmapItem,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QTextEdit,
 )
-from PySide6.QtCore import QThread, Signal, Slot
+from PySide6.QtGui import QIcon
+from PySide6.QtCore import Qt, QThread, Signal, QSize
 
 # 日志配置
 logName = "DealPdf"
@@ -32,138 +38,6 @@ handler = logging.FileHandler(logName + ".log")
 handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 handler.setLevel(logging.INFO)
 logger.addHandler(handler)
-
-
-class ConvertThread(QThread):
-    docx_count = Signal(int)
-    docx_curr = Signal(int)
-    docx_end = Signal()
-
-    def __init__(self, docx_path=None):
-        super().__init__()
-        self.docx_path = docx_path
-        self.stop = False
-
-    def run(self):
-        if self.docx_path is None:
-            return
-        else:
-            docx_path = self.docx_path
-        try:
-            word = win32.Dispatch("Word.Application")
-            word.Visible = False
-        except:
-            print("Please install Microsoft Word 2010 or later.")
-            logger.error("Please install Microsoft Word 2010 or later.")
-            QMessageBox.warning(
-                self, "Error", "Please install Microsoft Word 2010 or later."
-            )
-            return
-        docx_path = os.path.abspath(docx_path)
-        if os.path.isdir(docx_path):
-            source_files = [f for f in os.listdir(docx_path) if f.endswith(".docx")]
-        else:
-            source_files = [docx_path]
-        file_count = len(source_files)
-        self.docx_count.emit(file_count)
-        curr = 0
-        self.docx_curr.emit(curr)
-        for file_ in source_files:
-            if self.stop:
-                break
-            docx_file = os.path.join(docx_path, file_)
-            pdf_file = os.path.join(docx_path, file_.replace(".docx", ".pdf"))
-            try:
-                doc = word.Documents.Open(os.path.abspath(docx_file))
-                doc.SaveAs(os.path.abspath(pdf_file), FileFormat=17)
-                doc.Close(SaveChanges=False)
-            except Exception as e:
-                logger.error(f"Error converting {docx_file} to PDF: {e}")
-            curr = curr + 1
-            self.docx_curr.emit(curr)
-        logger.info(f"Converted {curr} success/{file_count-curr} fail files to PDF.")
-        word.Quit()
-        self.docx_end.emit()
-
-    def terminate(self):
-        self.stop = True
-        return super().terminate()
-
-
-class Docx2PdfWindow(QMainWindow, Ui_Docx2PdfWin):
-    def __init__(self, parent=None, rootpath=None):
-        super().__init__(parent)
-        self.setupUi(self)
-        self.rootpath = (
-            rootpath if rootpath else os.path.join(os.path.expanduser("~"), "Documents")
-        )
-        self.docx2pdf_thread = None
-        self.path = ""
-
-        self.btn_docxdir.clicked.connect(lambda: self.select_docx_path(is_dir=True))
-        self.button_docxfile.clicked.connect(
-            lambda: self.select_docx_path(is_dir=False)
-        )
-        self.btn_docx2pdf.clicked.connect(self.docx2pdfThread)
-
-    def select_docx_path(self, is_dir=True):
-        if is_dir:
-            path = QFileDialog.getExistingDirectory(
-                self,
-                "选择DOCX文件所在目录",
-                dir=self.rootpath,
-            )
-            self.rootpath = os.path.split(path)[0]
-            if path:
-                self.textEdit_docx.setText(path)
-                self.path = path
-        else:
-            path = QFileDialog.getOpenFileName(
-                self,
-                "选择DOCX文件",
-                filter="DOCX文件 (*.docx)",
-                dir=self.rootpath,
-            )
-            self.rootpath = os.path.split(os.path.dirname(path[0]))[0]
-            if path:
-                self.textEdit_docx.setText(path[0])
-                self.path = path[0]
-
-    def docx2pdfThread(self):
-        self.docx2pdf_thread = ConvertThread(self.path)
-        self.docx2pdf_thread.docx_count.connect(self.createStatusBar)
-        self.docx2pdf_thread.docx_curr.connect(self.updateStatusBar)
-        self.docx2pdf_thread.docx_end.connect(self.endStatus)
-        self.docx2pdf_thread.start()
-
-    @Slot(int)
-    def createStatusBar(self, file_count):
-        self.file_count = file_count
-        # 创建状态栏进度条
-        self.statusBar_docx.showMessage("正在转换DOCX文件...")
-        self.pgBar = QProgressBar(self.statusBar_docx)
-        self.pgBar.setMinimum(0)
-        self.pgBar.setMaximum(file_count)
-        self.pgBar.setValue(0)
-        self.statusBar_docx.addPermanentWidget(self.pgBar)
-
-    @Slot(int)
-    def updateStatusBar(self, value):
-        self.curr = value
-        self.pgBar.setValue(value)
-        self.statusBar_docx.showMessage(f"正在转换DOCX文件...{value}/{self.file_count}")
-
-    @Slot()
-    def endStatus(self):
-        self.statusBar_docx.removeWidget(self.pgBar)
-        self.statusBar_docx.showMessage(
-            f"转换DOCX文件:{self.curr}成功/{self.file_count-self.curr}失败"
-        )
-
-    def closeEvent(self, event):
-        if hasattr(self, "docx2pdf_thread") and self.docx2pdf_thread is not None:
-            self.docx2pdf_thread.terminate()
-        return super().closeEvent(event)
 
 
 class ProcessPdfThread(QThread):
@@ -322,6 +196,7 @@ class EMIWindow(MainWindow):
         self.action_doc.triggered.connect(self.show_helpdoc)
         self.action_log.triggered.connect(self.show_log)
         self.action_topdf.triggered.connect(self.show_docx2pdf)
+        self.action_wordreplace.triggered.connect(self.show_wordreplace)
 
     def select_modelpath(self):
         path = QFileDialog.getExistingDirectory(
@@ -392,11 +267,27 @@ class EMIWindow(MainWindow):
         logger.info("Log cleared.")
 
     def show_docx2pdf(self):
+        if hasattr(self, "docx2pdf_win") and self.docx2pdf_win is not None:
+            self.docx2pdf_win.activateWindow()
+            return
         self.docx2pdf_win = Docx2PdfWindow(rootpath=self.rootpath)
         self.windows.append(self.docx2pdf_win)
         self.docx2pdf_win.show()
+        self.windows.append(self.docx2pdf_win)
+
+    def show_wordreplace(self):
+        if hasattr(self, "wordreplace_win") and self.wordreplace_win is not None:
+            self.wordreplace_win.activateWindow()
+            return
+        self.wordreplace_win = WordReplace(rootpath=self.rootpath)
+        self.windows.append(self.wordreplace_win)
+        self.wordreplace_win.show()
+        self.windows.append(self.wordreplace_win)
 
     def show_setting(self):
+        if hasattr(self, "setting_win") and self.setting_win is not None:
+            self.setting_win.activateWindow()
+            return
         self.setting_win = QWidget()
         self.setting_win.setWindowTitle("设置")
         icon = QIcon(":/emipdf/acbel -1.jpg")
@@ -458,6 +349,11 @@ class EMIWindow(MainWindow):
         self.windows.append(self.setting_win)
 
     def show_log(self):
+        if hasattr(self, "log_win") and self.log_win is not None:
+            if not self.log_win.isVisible():
+                self.log_win.show()
+            self.log_win.activateWindow()
+            return
         self.log_win = QDialog()
         self.log_win.setWindowTitle("日志")
         icon = QIcon()
@@ -489,6 +385,91 @@ class EMIWindow(MainWindow):
 
         self.log_win.show()
         self.windows.append(self.log_win)
+
+    def show_about(self):
+        if hasattr(self, "about_win") and self.about_win is not None:
+            self.about_win.activateWindow()
+            return
+        self.about_win = QWidget()
+        self.about_win.setWindowTitle("关于")
+        icon = QIcon()
+        icon.addFile(":/emipdf/acbel -1.jpg", QSize(), QIcon.Normal, QIcon.Off)
+        self.about_win.setWindowIcon(icon)
+        self.about_win.resize(300, 200)
+        self.about_win.setStyleSheet("QLabel { font-size: 15px; }")
+        self.about_win.setLayout(QVBoxLayout())
+
+        label_about = QLabel(
+            text="EMI-Report\n\n版本：1.2.0\n\n作者：Lucas Li\n\n邮箱：Lucas_Li@acbel.com",
+            alignment=Qt.AlignCenter,
+        )
+        label_about.setWordWrap(True)
+        self.about_win.layout().addWidget(label_about)
+
+        self.about_win.show()
+        self.windows.append(self.about_win)
+
+    def show_helpdoc(self):
+        if hasattr(self, "helpdoc_win") and self.helpdoc_win is not None:
+            self.helpdoc_win.activateWindow()
+            return
+        self.helpdoc_win = QWidget()
+        self.helpdoc_win.setWindowTitle("帮助文档")
+        icon = QIcon()
+        icon.addFile(":/emipdf/acbel -1.jpg", QSize(), QIcon.Normal, QIcon.Off)
+        self.helpdoc_win.setWindowIcon(icon)
+        self.helpdoc_win.resize(800, 600)
+        self.helpdoc_win.setStyleSheet("QLabel { font-size: 15px; }")
+        self.helpdoc_win.setLayout(QVBoxLayout())
+
+        label_helpdoc = QLabel(
+            text="EMI-Report\n\n待补充...\n\n", alignment=Qt.AlignLeft
+        )
+        label_helpdoc.setWordWrap(True)
+        self.helpdoc_win.layout().addWidget(label_helpdoc)
+
+        self.helpdoc_win.show()
+        self.windows.append(self.helpdoc_win)
+
+    def show_done(self, SaveFile):
+        if hasattr(self, "done_win") and self.done_win is not None:
+            self.done_win.activateWindow()
+            return
+        self.done_win = QWidget(self)
+        self.done_win.setWindowTitle("完成!")
+        icon = QIcon(":/emipdf/acbel -1.jpg")
+        self.done_win.setWindowIcon(icon)
+        self.done_win.resize(600, 200)
+        self.done_win.setLayout(QVBoxLayout())
+
+        label1 = QLabel(
+            f'文件已保存为 "{os.path.abspath(SaveFile)}"', alignment=Qt.AlignLeft
+        )
+        self.done_win.layout().addWidget(label1)
+
+        label2_text = (
+            "您还需要进行下列步骤以完成报告：\n"
+            "\t1. 填入日期，测试者等表头信息，注意是MP还是MVT.\n"
+            "\t2. 千万注意限值标准是否对应，默认Class B.\n"
+            "\t3. 插入测试图片和压缩包.\n"
+            "\t4. 整理表格，如果有多余项请按需求删除."
+        )
+        label2 = QLabel(text=label2_text, alignment=Qt.AlignLeft)
+        label2.setWordWrap(True)
+        self.done_win.layout().addWidget(label2)
+
+        label3 = QLabel(
+            "---------------请确认以上步骤都已完成，按OK退出。---------------",
+            alignment=Qt.AlignLeft,
+        )
+        self.done_win.layout().addWidget(label3)
+
+        ok_button = QPushButton("OK")
+        ok_button.clicked.connect(self.done_win.close)
+        self.done_win.layout().addWidget(ok_button)
+
+        self.done_win.show()
+        self.windows.append(self.done_win)
 
     def open_template(self):
         tmpFile = self.lineEdit_template.text()

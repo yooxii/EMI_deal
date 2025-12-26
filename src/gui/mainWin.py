@@ -1,36 +1,5 @@
-from PySide6.QtCore import (
-    QCoreApplication,
-    QDate,
-    QDateTime,
-    QLocale,
-    QMetaObject,
-    QObject,
-    QPoint,
-    QRect,
-    QSize,
-    QTime,
-    QUrl,
-    Qt,
-)
-from PySide6.QtGui import (
-    QAction,
-    QBrush,
-    QColor,
-    QConicalGradient,
-    QCursor,
-    QFont,
-    QFontDatabase,
-    QGradient,
-    QIcon,
-    QImage,
-    QKeySequence,
-    QLinearGradient,
-    QPainter,
-    QPalette,
-    QPixmap,
-    QRadialGradient,
-    QTransform,
-)
+from PySide6.QtCore import QDate, QRect, QSize, Qt
+from PySide6.QtGui import QAction, QCursor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QLabel,
@@ -39,9 +8,7 @@ from PySide6.QtWidgets import (
     QMenuBar,
     QLineEdit,
     QSpinBox,
-    QComboBox,
     QDateEdit,
-    QButtonGroup,
     QPushButton,
     QSizePolicy,
     QSpacerItem,
@@ -54,13 +21,13 @@ from PySide6.QtWidgets import (
     QWidget,
     QFrame,
 )
+from gui.res_rc import *
 import os
 import sys
 import logging
 
 logger = logging.getLogger(__name__)
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
-import gui.res_rc as res_rc
 
 
 class HoverLineEdit(QLineEdit):
@@ -301,8 +268,11 @@ class MainWindow(QMainWindow):
         self.action_log.setShortcut("Ctrl+J")
         self.action_topdf = QAction(self.tr("docx转pdf"), self.menuTool)
         self.action_topdf.setShortcut("Ctrl+T")
+        self.action_wordreplace = QAction(self.tr("word替换"), self)
+        self.action_wordreplace.setShortcut("Ctrl+G")
         self.menuTool.addAction(self.action_log)
         self.menuTool.addAction(self.action_topdf)
+        self.addAction(self.action_wordreplace)
         self.mainMenuBar.addMenu(self.menuTool)
 
         self.menuHelp = QMenu(self.mainMenuBar)
@@ -315,79 +285,6 @@ class MainWindow(QMainWindow):
         self.mainMenuBar.addMenu(self.menuHelp)
 
         self.setMenuBar(self.mainMenuBar)
-
-    def show_about(self):
-        self.about_win = QWidget(self)
-        self.about_win.setWindowTitle("关于")
-        icon = QIcon()
-        icon.addFile(":/emipdf/acbel -1.jpg", QSize(), QIcon.Normal, QIcon.Off)
-        self.about_win.setWindowIcon(icon)
-        self.about_win.resize(300, 200)
-        self.about_win.setStyleSheet("QLabel { font-size: 15px; }")
-        self.about_win.setLayout(QVBoxLayout())
-
-        label_about = QLabel(
-            text="EMI-Report\n\n版本：1.2.0\n\n作者：Lucas Li\n\n邮箱：Lucas_Li@acbel.com",
-            alignment=Qt.AlignCenter,
-        )
-        label_about.setWordWrap(True)
-        self.about_win.layout().addWidget(label_about)
-
-        self.about_win.show()
-
-    def show_helpdoc(self):
-        self.helpdoc_win = QWidget(self)
-        self.helpdoc_win.setWindowTitle("帮助文档")
-        icon = QIcon()
-        icon.addFile(":/emipdf/acbel -1.jpg", QSize(), QIcon.Normal, QIcon.Off)
-        self.helpdoc_win.setWindowIcon(icon)
-        self.helpdoc_win.resize(800, 600)
-        self.helpdoc_win.setStyleSheet("QLabel { font-size: 15px; }")
-        self.helpdoc_win.setLayout(QVBoxLayout())
-
-        label_helpdoc = QLabel(
-            text="EMI-Report\n\n待补充...\n\n", alignment=Qt.AlignLeft
-        )
-        label_helpdoc.setWordWrap(True)
-        self.helpdoc_win.layout().addWidget(label_helpdoc)
-
-        self.helpdoc_win.show()
-
-    def show_done(self, SaveFile):
-        self.done_win = QWidget(self)
-        self.done_win.setWindowTitle("完成!")
-        icon = QIcon(":/emipdf/acbel -1.jpg")
-        self.done_win.setWindowIcon(icon)
-        self.done_win.resize(600, 200)
-        self.done_win.setLayout(QVBoxLayout())
-
-        label1 = QLabel(
-            f'文件已保存为 "{os.path.abspath(SaveFile)}"', alignment=Qt.AlignLeft
-        )
-        self.done_win.layout().addWidget(label1)
-
-        label2_text = (
-            "您还需要进行下列步骤以完成报告：\n"
-            "\t1. 填入日期，测试者等表头信息，注意是MP还是MVT.\n"
-            "\t2. 千万注意限值标准是否对应，默认Class B.\n"
-            "\t3. 插入测试图片和压缩包.\n"
-            "\t4. 整理表格，如果有多余项请按需求删除."
-        )
-        label2 = QLabel(text=label2_text, alignment=Qt.AlignLeft)
-        label2.setWordWrap(True)
-        self.done_win.layout().addWidget(label2)
-
-        label3 = QLabel(
-            "---------------请确认以上步骤都已完成，按OK退出。---------------",
-            alignment=Qt.AlignLeft,
-        )
-        self.done_win.layout().addWidget(label3)
-
-        ok_button = QPushButton("OK")
-        ok_button.clicked.connect(self.done_win.close)
-        self.done_win.layout().addWidget(ok_button)
-
-        self.done_win.show()
 
 
 if __name__ == "__main__":
