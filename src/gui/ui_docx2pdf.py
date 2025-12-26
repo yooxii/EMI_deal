@@ -32,6 +32,7 @@ class ConvertThread(QThread):
     docx_count = Signal(int)
     docx_curr = Signal(int)
     docx_end = Signal()
+    docx_error = Signal(str)
 
     def __init__(self, docx_path=None):
         super().__init__()
@@ -61,6 +62,7 @@ class ConvertThread(QThread):
         file_count = len(source_files)
         self.docx_count.emit(file_count)
         curr = 0
+        error_counts = 0
         self.docx_curr.emit(curr)
         for file_ in source_files:
             if self.stop:
@@ -71,11 +73,17 @@ class ConvertThread(QThread):
                 doc = word.Documents.Open(os.path.abspath(docx_file))
                 doc.SaveAs(os.path.abspath(pdf_file), FileFormat=17)
                 doc.Close(SaveChanges=False)
+                logger.info(f"Converted {docx_file} to PDF.")
             except Exception as e:
                 logger.error(f"Error converting {docx_file} to PDF: {e}")
+                error_counts += 1
             curr = curr + 1
             self.docx_curr.emit(curr)
-        logger.info(f"Converted {curr} success/{file_count-curr} fail files to PDF.")
+        if error_counts > 0:
+            QMessageBox.warning(
+                self, "Warning", f"{error_counts} files failed to convert."
+            )
+        logger.error(f"{error_counts} Fail / {file_count} Total files convert.")
         word.Quit()
         self.docx_end.emit()
 
@@ -210,6 +218,8 @@ class Ui_Docx2PdfWin(QMainWindow):
 class Docx2PdfWindow(Ui_Docx2PdfWin):
     def __init__(self, parent=None, rootpath=None):
         super().__init__(parent)
+        self.running = False
+
         self.setupUi(self)
         self.rootpath = (
             rootpath if rootpath else os.path.join(os.path.expanduser("~"), "Documents")
@@ -222,6 +232,8 @@ class Docx2PdfWindow(Ui_Docx2PdfWin):
             lambda: self.select_docx_path(is_dir=False)
         )
         self.btn_docx2pdf.clicked.connect(self.docx2pdfThread)
+
+        logger.info("Docx2PdfWindow inited")
 
     def select_docx_path(self, is_dir=True):
         if is_dir:
@@ -247,6 +259,11 @@ class Docx2PdfWindow(Ui_Docx2PdfWin):
                 self.path = path[0]
 
     def docx2pdfThread(self):
+        if self.running:
+            logger.warning("docx2pdfThread is running, do not start again")
+            return
+        self.running = True
+        logger.info("docx2pdfThread start")
         self.docx2pdf_thread = ConvertThread(self.path)
         self.docx2pdf_thread.docx_count.connect(self.createStatusBar)
         self.docx2pdf_thread.docx_curr.connect(self.updateStatusBar)
@@ -276,6 +293,7 @@ class Docx2PdfWindow(Ui_Docx2PdfWin):
         self.statusBar_docx.showMessage(
             f"转换DOCX文件:{self.curr}成功/{self.file_count-self.curr}失败"
         )
+        self.running = False
 
     def closeEvent(self, event):
         if hasattr(self, "docx2pdf_thread") and self.docx2pdf_thread is not None:

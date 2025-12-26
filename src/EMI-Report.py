@@ -31,13 +31,11 @@ from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt, QThread, Signal, QSize
 
 # 日志配置
-logName = "DealPdf"
-logger = logging.getLogger(logName)
-logger.setLevel(logging.INFO)
-handler = logging.FileHandler(logName + ".log")
-handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-handler.setLevel(logging.INFO)
-logger.addHandler(handler)
+from logger import setup_logging
+
+logName = "EMIRper.log"
+setup_logging(log_dir=".", log_filename=logName)
+logger = logging.getLogger(__name__)
 
 
 class ProcessPdfThread(QThread):
@@ -55,6 +53,8 @@ class ProcessPdfThread(QThread):
             self.processing_finished.emit(result)
         except Exception as e:
             self.processing_error.emit(str(e))
+            return
+        logger.info(f"Pdf Processing completed!")
 
     def openPdf(self, path_pdf):
         # 读取pdf文件，提取数据
@@ -94,15 +94,14 @@ class ProcessPdfThread(QThread):
         res = {}
         source_files = [f for f in os.listdir(modeldir) if f.endswith(".pdf")]
 
-        total_files = len(source_files)
         for i, source_file in enumerate(source_files):
-            logger.info(f"FileName: {source_file}")
+            logger.info(f"Deal pdf fileName: {source_file}")
             try:
                 res[source_file] = self.openPdf(os.path.join(modeldir, source_file))
                 # 发送进度更新信号
                 self.progress_updated.emit(i + 1)
             except Exception as e:
-                logger.error(f"Error processing {source_file}: {e}")
+                logger.error(f"Error pdf processing {source_file}: {e}")
                 continue
         return res
 
@@ -121,7 +120,6 @@ class ZipThread(QThread):
         self.zip_folder()
 
     def zip_folder(self):
-        print("Zipping folder...")
         try:
             file_count = 0
             pdf_files = []
@@ -134,7 +132,7 @@ class ZipThread(QThread):
                         pdf_files.append((rootPath, file))
 
             # 执行压缩操作
-            print(f"Zipping {file_count} files...")
+            logger.info(f"Zipping {file_count} files...")
             with zipfile.ZipFile(
                 f"{self.zipname}.zip", "w", zipfile.ZIP_LZMA
             ) as harZip:
@@ -150,7 +148,6 @@ class ZipThread(QThread):
 
             # 压缩完成，发送完成信号
             self.zip_finished.emit(self.zipname)
-            print("Done!")
         except Exception as e:
             self.zip_error.emit(str(e))
 
@@ -161,8 +158,10 @@ class EMIWindow(MainWindow):
 
         self.init_var()
         self.init_connect()
+        logger.info("main window inited.")
 
     def init_var(self):
+        self.getpdf_running = False
         self.row_sn_ = 44  # 序列号所在行
         self.col_sn_ = 4  # 序列号所在列
         self.col_vol_ = 11  # 电压所在列
@@ -183,6 +182,7 @@ class EMIWindow(MainWindow):
         self.save_file_name = None
 
         self.res = None
+        self.log_path = os.path.join(os.getcwd(), logName)
 
     def init_connect(self):
         self.btn_exit.clicked.connect(self.close)
@@ -252,6 +252,15 @@ class EMIWindow(MainWindow):
         for key, _ in self.settings.items():
             self.settings_value[key] = self.settings[key].isChecked()
         logger.info(f"Setting updated: {self.settings_value}")
+
+    def update_log(self):
+        if self.Text_log is None:
+            return
+        if self.log_path is None:
+            self.log_path = os.path.join(os.getcwd(), logName)
+        if not os.path.exists(self.log_path):
+            open(self.log_path, "w").close()
+        self.Text_log.setText(open(self.log_path, "r").read())
 
     def export_log(self):
         export_path = QFileDialog.getSaveFileName(
@@ -353,6 +362,7 @@ class EMIWindow(MainWindow):
 
     def show_log(self):
         if hasattr(self, "log_win") and self.log_win is not None:
+            self.update_log()
             self.log_win.show()
             self.log_win.activateWindow()
             return
@@ -365,15 +375,17 @@ class EMIWindow(MainWindow):
         self.log_win.setStyleSheet("QLabel { font-size: 15px; }")
         self.log_win.setLayout(QVBoxLayout())
 
-        self.log_path = os.path.join(os.getcwd(), logName + ".log")
+        self.log_path = os.path.join(os.getcwd(), logName)
 
-        self.Text_log = QTextEdit(
-            text=open(self.log_path, "r").read(), alignment=Qt.AlignLeft, readOnly=True
-        )
+        self.Text_log = QTextEdit(alignment=Qt.AlignLeft, readOnly=True)
         self.Text_log.setLineWrapMode(QTextEdit.WidgetWidth)
         self.log_win.layout().addWidget(self.Text_log)
 
         layout_btn = QHBoxLayout()
+
+        btn_update = QPushButton(text="更 新 日 志")
+        btn_update.clicked.connect(self.update_log)
+        layout_btn.addWidget(btn_update)
 
         btn_clear = QPushButton(text="清 空 日 志")
         btn_clear.clicked.connect(self.clear_log)
@@ -385,6 +397,7 @@ class EMIWindow(MainWindow):
 
         self.log_win.layout().addLayout(layout_btn)
 
+        self.update_log()
         self.log_win.show()
         self.windows.append(self.log_win)
 
@@ -440,7 +453,7 @@ class EMIWindow(MainWindow):
             self.done_win.show()
             self.done_win.activateWindow()
             return
-        self.done_win = QWidget(self)
+        self.done_win = QWidget()
         self.done_win.setWindowTitle("完成!")
         icon = QIcon(":/emipdf/acbel -1.jpg")
         self.done_win.setWindowIcon(icon)
@@ -638,7 +651,7 @@ class EMIWindow(MainWindow):
         wb.remove(ws_setup)
         wb.save(SaveFile)
         self.save_file_name = SaveFile
-        print("Done!")
+        logger.info("Writted into report.")
         if self.settings_value["NeedZip"]:
             try:
                 self.zip_folder(directory, uutname)
@@ -649,6 +662,12 @@ class EMIWindow(MainWindow):
                 )
 
     def getpdfdatas(self):
+        if self.getpdf_running:
+            logger.warning("Getting PDF is already running, do not start again")
+            return
+        self.getpdf_running = True
+        logger.info("Getting PDF start")
+
         directory = self.lineEdit_model.text()
         source_files = [f for f in os.listdir(directory) if f.endswith(".pdf")]
         self.file_count = len(source_files)
@@ -673,10 +692,11 @@ class EMIWindow(MainWindow):
         self.statusBar().removeWidget(self.progressBar)
         # 继续后续处理
         self.main_func(self.res)
+        self.getpdf_running = False
 
     def onProcessingError(self, error_msg):
-        logger.error(f"Processing error: {error_msg}")
-        QMessageBox.critical(self, "Error", f"Processing error: {error_msg}")
+        logger.error(f"Pdf Processing error: {error_msg}")
+        QMessageBox.critical(self, "Error", f"Pdf Processing error: {error_msg}")
         self.statusBar().removeWidget(self.progressBar)
 
     def updateProgressBar(self):
@@ -689,7 +709,7 @@ class EMIWindow(MainWindow):
             excel = win32.Dispatch("Excel.Application")
             excel.Visible = True
         except:
-            print("Please install Microsoft Word 2010 or later.")
+            logger.error("Please install Microsoft Word 2010 or later.")
             return
         try:
             wb = excel.Workbooks.Open(os.path.abspath(SaveFile))
@@ -721,7 +741,7 @@ class EMIWindow(MainWindow):
             QMessageBox.critical(self, "Error", f"Error adding zip to Excel: {e}")
 
     def zip_folder(self, directory, zipname):
-        print("Zipping folder...")
+        logger.info("Zipping folder...")
         file_count = 0
         for rootPath, _, files in os.walk(directory):
             for _file in files:
@@ -761,6 +781,7 @@ class EMIWindow(MainWindow):
         if SaveFile and self.settings_value["AddZip"]:
             self.addZipToExcel(zipname, SaveFile)
 
+        logger.info("Zip finished")
         self.show_done(SaveFile)
 
     def onZipError(self, error_msg):
