@@ -268,6 +268,7 @@ class EMIWindow(MainWindow):
 
     def show_docx2pdf(self):
         if hasattr(self, "docx2pdf_win") and self.docx2pdf_win is not None:
+            self.docx2pdf_win.show()
             self.docx2pdf_win.activateWindow()
             return
         self.docx2pdf_win = Docx2PdfWindow(rootpath=self.rootpath)
@@ -277,6 +278,7 @@ class EMIWindow(MainWindow):
 
     def show_wordreplace(self):
         if hasattr(self, "wordreplace_win") and self.wordreplace_win is not None:
+            self.wordreplace_win.show()
             self.wordreplace_win.activateWindow()
             return
         self.wordreplace_win = WordReplace(rootpath=self.rootpath)
@@ -286,6 +288,7 @@ class EMIWindow(MainWindow):
 
     def show_setting(self):
         if hasattr(self, "setting_win") and self.setting_win is not None:
+            self.setting_win.show()
             self.setting_win.activateWindow()
             return
         self.setting_win = QWidget()
@@ -350,8 +353,7 @@ class EMIWindow(MainWindow):
 
     def show_log(self):
         if hasattr(self, "log_win") and self.log_win is not None:
-            if not self.log_win.isVisible():
-                self.log_win.show()
+            self.log_win.show()
             self.log_win.activateWindow()
             return
         self.log_win = QDialog()
@@ -388,6 +390,7 @@ class EMIWindow(MainWindow):
 
     def show_about(self):
         if hasattr(self, "about_win") and self.about_win is not None:
+            self.about_win.show()
             self.about_win.activateWindow()
             return
         self.about_win = QWidget()
@@ -411,6 +414,7 @@ class EMIWindow(MainWindow):
 
     def show_helpdoc(self):
         if hasattr(self, "helpdoc_win") and self.helpdoc_win is not None:
+            self.helpdoc_win.show()
             self.helpdoc_win.activateWindow()
             return
         self.helpdoc_win = QWidget()
@@ -433,6 +437,7 @@ class EMIWindow(MainWindow):
 
     def show_done(self, SaveFile):
         if hasattr(self, "done_win") and self.done_win is not None:
+            self.done_win.show()
             self.done_win.activateWindow()
             return
         self.done_win = QWidget(self)
