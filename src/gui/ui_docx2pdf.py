@@ -83,7 +83,7 @@ class ConvertThread(QThread):
             QMessageBox.warning(
                 self, "Warning", f"{error_counts} files failed to convert."
             )
-        logger.error(f"{error_counts} Fail / {file_count} Total files convert.")
+        logger.info(f"{error_counts} Fail / {file_count} Total files convert.")
         word.Quit()
         self.docx_end.emit()
 
@@ -222,7 +222,9 @@ class Docx2PdfWindow(Ui_Docx2PdfWin):
 
         self.setupUi(self)
         self.rootpath = (
-            rootpath if rootpath else os.path.join(os.path.expanduser("~"), "Documents")
+            rootpath
+            if os.path.exists(rootpath)
+            else os.path.join(os.path.expanduser("~"), "Documents")
         )
         self.docx2pdf_thread = None
         self.path = ""
@@ -264,6 +266,7 @@ class Docx2PdfWindow(Ui_Docx2PdfWin):
             return
         self.running = True
         logger.info("docx2pdfThread start")
+        self.path = self.textEdit_docx.text()
         self.docx2pdf_thread = ConvertThread(self.path)
         self.docx2pdf_thread.docx_count.connect(self.createStatusBar)
         self.docx2pdf_thread.docx_curr.connect(self.updateStatusBar)
@@ -276,6 +279,7 @@ class Docx2PdfWindow(Ui_Docx2PdfWin):
         # 创建状态栏进度条
         self.statusBar_docx.showMessage("正在转换DOCX文件...")
         self.pgBar = QProgressBar(self.statusBar_docx)
+        self.pgBar.setMaximumHeight(15)
         self.pgBar.setMinimum(0)
         self.pgBar.setMaximum(file_count)
         self.pgBar.setValue(0)

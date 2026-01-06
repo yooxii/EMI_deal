@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from PySide6.QtCore import Qt, QSize, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QSize, QThread, Signal, Slot, QStandardPaths
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -79,7 +79,11 @@ def replace_value(content: str):
     for i, value in enumerate(all_value):
         if i % 8 == 1 or i % 8 == 4:
             upper = int((all_value[i + 1] - value) * 100)
-            tmp1 = value + random.randrange(-upper, upper) / 2000
+            try:
+                tmp1 = value + random.randrange(-upper, upper) / 2000
+            except:
+                logger.warning(f"无法随机的值:{value}")
+                tmp1 = value
             tmp2 = all_value[i + 1] - tmp1
             content = content.replace(str(value), str(round(tmp1, 2)))
             content = content.replace(str(all_value[i + 2]), str(round(tmp2, 2)))
@@ -88,9 +92,10 @@ def replace_value(content: str):
 
 
 class WordReplaceThread(QThread):
-    docx_count = Signal(int)
-    docx_curr = Signal(int)
-    docx_end = Signal()
+    WordRepl_count = Signal(int)
+    WordRepl_curr = Signal(int)
+    WordRepl_end = Signal()
+    WordRepl_error = Signal(str)
 
     def __init__(
         self, path_src, path_tgt, args_srcs, args_tgts, args_src=None, args_tgt=None
@@ -111,7 +116,9 @@ class WordReplaceThread(QThread):
             self.args_srcStrings,
             self.args_tgtStrings,
         ]:
-            logger.error("请选择源文件、目标文件、源参数、目标参数")
+            err = self.tr("请补充完整信息")
+            logger.error(err)
+            self.WordRepl_error.emit(err)
             return
         else:
             # 确保路径可被访问
@@ -128,10 +135,9 @@ class WordReplaceThread(QThread):
                     "," if "," in self.args_tgtStrings else None
                 )
             if len(self.args_srcStrings) != len(self.args_tgtStrings):
-                logger.error("源字符串集和目标字符串集数量不一致")
-                QMessageBox.critical(
-                    self, "Error", "源字符串集和目标字符串集数量不一致"
-                )
+                err = self.tr("源字符串集和目标字符串集数量不一致")
+                logger.error(err)
+                self.WordRepl_error.emit(err)
                 return
         # 获取源文件列表
         if os.path.isdir(path_src):
@@ -142,30 +148,37 @@ class WordReplaceThread(QThread):
         if not os.path.exists(path_tgt):
             os.makedirs(path_tgt)
         file_count = len(source_files)
-        self.docx_count.emit(file_count)
+        self.WordRepl_count.emit(file_count)
         curr = 0  # 当前处理文件计数
-        self.docx_curr.emit(curr)
+        self.WordRepl_curr.emit(curr)
         #
         for src_Strings, tgt_Strings in zip(self.args_srcStrings, self.args_tgtStrings):
             dealed_files = []
             for srcfile in source_files:
+                if self.stop:
+                    self.WordRepl_end.emit()
+                    return
                 if srcfile.find(src_Strings) >= 0:
                     srcpath = os.path.join(path_src, srcfile)
                     tgtpath = os.path.join(
                         path_tgt, srcfile.replace(src_Strings, tgt_Strings)
                     )
-                    replace_text_in_docx(
-                        srcpath,
-                        tgtpath,
-                        [src_Strings, self.args_srcString],
-                        [tgt_Strings, self.args_tgtString],
-                    )
+                    try:
+                        replace_text_in_docx(
+                            srcpath,
+                            tgtpath,
+                            [src_Strings, self.args_srcString],
+                            [tgt_Strings, self.args_tgtString],
+                        )
+                    except Exception as e:
+                        logger.error(f"replace_text_in_docx:{e}")
+                        curr -= 1
                     dealed_files.append(srcfile)
                     curr += 1
-                    self.docx_curr.emit(curr)
+                    self.WordRepl_curr.emit(curr)
             for dealed_file in dealed_files:
                 source_files.remove(dealed_file)
-        self.docx_end.emit()
+        self.WordRepl_end.emit()
 
     def terminate(self):
         self.stop = True
@@ -177,7 +190,11 @@ class WordReplace(QMainWindow):
         super().__init__(parent)
         self.setupUi()
         self.rootpath = (
-            rootpath if rootpath else os.path.join(os.path.expanduser("~"), "Documents")
+            rootpath
+            if rootpath and os.path.exists(rootpath)
+            else QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.DocumentsLocation
+            )
         )
         self.wordreplace_thread = None
 
@@ -185,6 +202,7 @@ class WordReplace(QMainWindow):
         self.btn_srcfile.clicked.connect(self.select_srcdocx_file)
         self.btn_tgtpath.clicked.connect(self.select_tgtpath)
         self.btn_start.clicked.connect(self.wordreplaceThread)
+        self.btn_stop.clicked.connect(self.wordreplaceStop)
         self.btn_close.clicked.connect(self.close)
 
     def setupUi(self):
@@ -299,6 +317,10 @@ class WordReplace(QMainWindow):
         self.btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
         Layout_btns.addWidget(self.btn_start)
         Layout_btns.addSpacerItem(QSpacerItem(40, 20, QSizePolicy.Policy.Fixed))
+        self.btn_stop = QPushButton(self.tr("中止"))
+        self.btn_stop.setCursor(Qt.CursorShape.PointingHandCursor)
+        Layout_btns.addWidget(self.btn_stop)
+        Layout_btns.addSpacerItem(QSpacerItem(40, 20, QSizePolicy.Policy.Fixed))
         self.btn_close = QPushButton(self.tr("关闭"))
         self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
         Layout_btns.addWidget(self.btn_close)
@@ -310,7 +332,7 @@ class WordReplace(QMainWindow):
     def select_srcdocx_path(self):
         path = QFileDialog.getExistingDirectory(
             self,
-            "选择DOCX文件所在目录",
+            self.tr("选择DOCX文件所在目录"),
             dir=self.rootpath,
         )
         self.rootpath = os.path.split(path)[0]
@@ -321,7 +343,7 @@ class WordReplace(QMainWindow):
     def select_tgtpath(self):
         path = QFileDialog.getExistingDirectory(
             self,
-            "选择DOCX文件所在目录",
+            self.tr("选择保存位置"),
             dir=self.rootpath,
         )
         self.rootpath = os.path.split(path)[0]
@@ -332,7 +354,7 @@ class WordReplace(QMainWindow):
     def select_srcdocx_file(self):
         path = QFileDialog.getOpenFileName(
             self,
-            "选择DOCX文件",
+            self.tr("选择DOCX文件"),
             filter="DOCX文件 (*.docx)",
             dir=self.rootpath,
         )
@@ -351,16 +373,26 @@ class WordReplace(QMainWindow):
             self.lineEdit_tgtString.text(),
         )
 
-        self.wordreplace_thread.docx_count.connect(self.createStatusBar)
-        self.wordreplace_thread.docx_curr.connect(self.updateStatusBar)
-        self.wordreplace_thread.docx_end.connect(self.endStatus)
+        self.wordreplace_thread.WordRepl_count.connect(self.createStatusBar)
+        self.wordreplace_thread.WordRepl_curr.connect(self.updateStatusBar)
+        self.wordreplace_thread.WordRepl_end.connect(self.endStatus)
+        self.wordreplace_thread.WordRepl_error.connect(self.errorStatus)
         self.wordreplace_thread.start()
+
+    def wordreplaceStop(self):
+        if hasattr(self, "wordreplace_thread") and self.wordreplace_thread is not None:
+            self.wordreplace_thread.terminate()
+            logger.info("wordreplace_thread" + self.tr(" 中止"))
+            if hasattr(self, "pgBar") and self.pgBar is not None:
+                self.statusBar_docx.removeWidget(self.pgBar)
+            self.wordreplace_thread = None
 
     @Slot(int)
     def createStatusBar(self, file_count):
+        self.curr = 0
         self.file_count = file_count
         # 创建状态栏进度条
-        self.statusBar_docx.showMessage("正在替换DOCX文件...")
+        self.statusBar_docx.showMessage(self.tr("正在替换DOCX文件..."))
         self.pgBar = QProgressBar(self.statusBar_docx)
         self.pgBar.setMinimum(0)
         self.pgBar.setMaximum(file_count)
@@ -371,14 +403,26 @@ class WordReplace(QMainWindow):
     def updateStatusBar(self, value):
         self.curr = value
         self.pgBar.setValue(value)
-        self.statusBar_docx.showMessage(f"正在替换DOCX文件...{value}/{self.file_count}")
+        self.statusBar_docx.showMessage(
+            self.tr("正在替换DOCX文件...") + f"{value}/{self.file_count}"
+        )
 
     @Slot()
     def endStatus(self):
-        self.statusBar_docx.removeWidget(self.pgBar)
-        self.statusBar_docx.showMessage(
-            f"替换DOCX文件:{self.curr}成功/{self.file_count-self.curr}失败"
-        )
+        if hasattr(self, "pgBar") and self.pgBar is not None:
+            self.statusBar_docx.removeWidget(self.pgBar)
+        if hasattr(self, "curr") and hasattr(self, "file_count"):
+            self.statusBar_docx.showMessage(
+                self.tr("替换DOCX文件结束(成功/总数):")
+                + f"{self.curr}/{self.file_count}"
+            )
+        if hasattr(self, "wordreplace_thread"):
+            self.wordreplace_thread = None
+
+    @Slot(str)
+    def errorStatus(self, err):
+        QMessageBox.critical(self, self.tr("错误"), err)
+        self.endStatus()
 
     def closeEvent(self, event):
         if hasattr(self, "wordreplace_thread") and self.wordreplace_thread is not None:
@@ -386,8 +430,17 @@ class WordReplace(QMainWindow):
         return super().closeEvent(event)
 
 
+def test():
+    ipath = "D:\Desktop_Li\WorkDir\EMC\WorkDir\\12\FSL023-EL1G\8SSP50H29728A1DB59S1030-220V-100%-N.docx"
+    opath = "D:\Desktop_Li\WorkDir\EMC\WorkDir\FSL023-EL1G\8SSP50H29728A1DB5C110E1-220V-100%-N.docx"
+    replace_text_in_docx(
+        ipath, opath, "8SSP50H29728A1DB59S1030", "8SSP50H29728A1DB5C110E1"
+    )
+
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     win = WordReplace()
     win.show()
     sys.exit(app.exec())
+    # test()

@@ -61,7 +61,7 @@ class HoverLineEdit(QLineEdit):
         pixmap = QPixmap(image_path)
         if not pixmap.isNull():
             self.preview_label.setPixmap(
-                pixmap.scaledToWidth(400, Qt.SmoothTransformation)
+                pixmap.scaledToWidth(300, Qt.SmoothTransformation)
             )  # 调整大小方便查看
 
             pos = self.mapToGlobal(self.geometry().topRight())
@@ -145,7 +145,7 @@ class MainWindow(QMainWindow):
 
         layout_qty = QHBoxLayout()
         layout_qty.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        label_qty = QLabel(self.tr("数量："))
+        label_qty = QLabel(self.tr("负载数量："))
         label_qty.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         layout_qty.addWidget(label_qty)
         self.spin_qty = QSpinBox()

@@ -4,6 +4,8 @@ import os
 import re
 import sys
 import zipfile
+from io import BytesIO
+from PIL import Image as PImage
 import openpyxl as xl
 from openpyxl.drawing import image
 import win32com.client as win32
@@ -28,14 +30,17 @@ from PySide6.QtWidgets import (
     QTextEdit,
 )
 from PySide6.QtGui import QIcon
-from PySide6.QtCore import Qt, QThread, Signal, QSize
+from PySide6.QtCore import Qt, QThread, Signal, QSize, QStandardPaths
 
 # 日志配置
-from logger import setup_logging
+from logger import setup_logging, get_error_logger, safe_execute, log_checkpoint
 
 logName = "EMIRper.log"
 setup_logging(log_dir=".", log_filename=logName)
 logger = logging.getLogger(__name__)
+
+# Initialize error logger
+error_logger = get_error_logger()
 
 
 class ProcessPdfThread(QThread):
@@ -178,11 +183,10 @@ class EMIWindow(MainWindow):
         }
         self.settings = {}  # 设置
         self.windows: list[QWidget] = []  # 打开的窗口
-        self.log_path = None  # 日志文件路径
+        self.log_path = os.path.join(os.getcwd(), logName)  # 日志文件路径
         self.save_file_name = None
 
         self.res = None
-        self.log_path = os.path.join(os.getcwd(), logName)
 
     def init_connect(self):
         self.btn_exit.clicked.connect(self.close)
@@ -191,6 +195,7 @@ class EMIWindow(MainWindow):
         self.btnfile_model.clicked.connect(self.select_modelpath)
         self.btnfile_img.clicked.connect(self.select_imgpath)
         self.btn_getdetail.clicked.connect(self.get_testdetail)
+        self.action_exit.triggered.connect(self.close)
         self.action_sets.triggered.connect(self.show_setting)
         self.action_about.triggered.connect(self.show_about)
         self.action_doc.triggered.connect(self.show_helpdoc)
@@ -199,48 +204,89 @@ class EMIWindow(MainWindow):
         self.action_wordreplace.triggered.connect(self.show_wordreplace)
 
     def select_modelpath(self):
-        path = QFileDialog.getExistingDirectory(
-            self,
-            "选择测试数据所在目录",
-            dir=(
-                self.rootpath
-                if self.rootpath
-                else os.path.join(os.path.expanduser("~"), "Documents")
-            ),
-        )
-        self.rootpath = os.path.split(path)[0]
-        if path:
-            self.lineEdit_model.setText(path)
+        log_checkpoint("Before opening directory dialog", "select_modelpath")
+        try:
+            path = QFileDialog.getExistingDirectory(
+                self,
+                self.tr("选择测试数据所在目录"),
+                dir=(
+                    self.rootpath
+                    if self.rootpath and os.path.exists(self.rootpath)
+                    else QStandardPaths.writableLocation(
+                        QStandardPaths.StandardLocation.DocumentsLocation
+                    )
+                ),
+            )
+            log_checkpoint("After directory dialog closed", "select_modelpath")
+
+            if path:
+                self.rootpath = os.path.split(path)[0]
+                self.lineEdit_model.setText(path)
+                logger.info(f"Selected model path: {path}")
+        except Exception as e:
+            error_logger.log_error(
+                "Failed to select model path", exc_info=e, context="select_modelpath"
+            )
+            QMessageBox.critical(
+                self, "错误", f"选择目录失败: {str(e)}\n详细信息已记录到 error.log"
+            )
 
     def select_templatepath(self):
-        path = QFileDialog.getOpenFileName(
-            self,
-            "选择模板",
-            filter="Excel文件 (*.xlsx)",
-            dir=(
-                self.rootpath
-                if self.rootpath
-                else os.path.join(os.path.expanduser("~"), "Documents")
-            ),
-        )
-        self.rootpath = os.path.split(os.path.dirname(path[0]))[0]
-        if path:
-            self.lineEdit_template.setText(path[0])
-            return path[0]
+        log_checkpoint("Before opening file dialog", "select_templatepath")
+        try:
+            path = QFileDialog.getOpenFileName(
+                self,
+                "选择模板",
+                filter="Excel文件 (*.xlsx)",
+                dir=(
+                    self.rootpath
+                    if self.rootpath and os.path.exists(self.rootpath)
+                    else QStandardPaths.writableLocation(
+                        QStandardPaths.StandardLocation.DocumentsLocation
+                    )
+                ),
+            )
+            log_checkpoint("After file dialog closed", "select_templatepath")
+
+            if path and path[0]:
+                self.rootpath = os.path.split(os.path.dirname(path[0]))[0]
+                self.lineEdit_template.setText(path[0])
+                logger.info(f"Selected template path: {path[0]}")
+                return path[0]
+        except Exception as e:
+            error_logger.log_error(
+                "Failed to select template path",
+                exc_info=e,
+                context="select_templatepath",
+            )
+            QMessageBox.critical(
+                self, "错误", f"选择模板失败: {str(e)}\n详细信息已记录到 error.log"
+            )
+            return None
 
     def select_imgpath(self):
-        path = QFileDialog.getOpenFileName(
-            self,
-            "选择图片",
-            filter="Image Files (*.png *.jpg *.jpeg *.bmp)",
-            dir=(
-                self.rootpath
-                if self.rootpath
-                else os.path.join(os.path.expanduser("~"), "Documents")
-            ),
-        )
-        if path:
-            self.lineEdit_img.setText(path[0])
+        log_checkpoint("Before opening image dialog", "select_imgpath")
+        try:
+            path = QFileDialog.getOpenFileName(
+                self,
+                "选择图片",
+                filter="Image Files (*.png *.jpg *.jpeg *.bmp)",
+                dir=QStandardPaths.writableLocation(
+                    QStandardPaths.StandardLocation.PicturesLocation
+                ),
+            )
+            log_checkpoint("After image dialog closed", "select_imgpath")
+
+            if path and path[0]:
+                self.lineEdit_img.setText(path[0])
+                logger.info(f"Selected image path: {path[0]}")
+        except Exception as e:
+            error_logger.log_error(
+                "Failed to select image path", exc_info=e, context="select_imgpath"
+            )
+            QMessageBox.critical(
+                self, "错误", f"选择图片失败: {str(e)}\n详细信息已记录到 error.log"
+            )
 
     def closeEvent(self, event):
         # 关闭所有窗口
@@ -260,7 +306,7 @@ class EMIWindow(MainWindow):
             self.log_path = os.path.join(os.getcwd(), logName)
         if not os.path.exists(self.log_path):
             open(self.log_path, "w").close()
-        self.Text_log.setText(open(self.log_path, "r").read())
+        self.Text_log.setText(open(self.log_path, "r", encoding="utf-8").read())
 
     def export_log(self):
         export_path = QFileDialog.getSaveFileName(
@@ -280,7 +326,7 @@ class EMIWindow(MainWindow):
             self.docx2pdf_win.show()
             self.docx2pdf_win.activateWindow()
             return
-        self.docx2pdf_win = Docx2PdfWindow(rootpath=self.rootpath)
+        self.docx2pdf_win = Docx2PdfWindow(rootpath=self.lineEdit_model.text())
         self.windows.append(self.docx2pdf_win)
         self.docx2pdf_win.show()
         self.windows.append(self.docx2pdf_win)
@@ -374,8 +420,6 @@ class EMIWindow(MainWindow):
         self.log_win.resize(800, 600)
         self.log_win.setStyleSheet("QLabel { font-size: 15px; }")
         self.log_win.setLayout(QVBoxLayout())
-
-        self.log_path = os.path.join(os.getcwd(), logName)
 
         self.Text_log = QTextEdit(alignment=Qt.AlignLeft, readOnly=True)
         self.Text_log.setLineWrapMode(QTextEdit.WidgetWidth)
@@ -577,10 +621,18 @@ class EMIWindow(MainWindow):
         img_path = self.lineEdit_img.text()
         if os.path.exists(img_path):
             img_path = os.path.realpath(img_path)
-            img = image.Image(img_path)
-            src_height = img.height
-            img.height = img_height = 250
-            img.width = int(img.width * img_height / src_height)
+            with PImage.open(img_path) as pimg:
+                if pimg.mode in ("RGBA", "P"):
+                    pimg = pimg.convert("RGB")
+                ratio = 250 / pimg.height
+                new_size = (int(pimg.width * ratio), int(pimg.height * ratio))
+                pimg = pimg.resize(new_size, PImage.Resampling.LANCZOS)
+
+                buffer = BytesIO()
+                pimg.save(buffer, format="JPEG", quality=100, optimize=True)
+                buffer.seek(0)
+
+            img = image.Image(buffer)
             ws.add_image(img, "C27")
 
         test_count = len(set([it.split("-")[0] for it in res.keys()]))
@@ -625,10 +677,16 @@ class EMIWindow(MainWindow):
                 else 0
             )
             row_load = row_vol
-            while row_load < row_vol + (loadqty * 2) and int(
-                ws.cell(row=row_load, column=self.col_load_).value * 100
-            ) != int(re.match(r"\d+", datas["Load"]).group()):
-                row_load += 2
+            try:
+                while row_load < row_vol + (loadqty * 2) and int(
+                    ws.cell(row=row_load, column=self.col_load_).value * 100
+                ) != int(re.match(r"\d+", datas["Load"]).group()):
+                    row_load += 2
+            except Exception as e:
+                msg = self.tr("负载数量与模板不符！")
+                logger.error(msg)
+                QMessageBox.information(self, "错误", msg)
+                return
 
             data = datas["datas"][0]
             row_line = (
@@ -675,6 +733,7 @@ class EMIWindow(MainWindow):
         # 创建状态栏进度条
         self.statusBar().showMessage("正在处理文件...")
         self.progressBar = QProgressBar(self.statusBar_main)
+        self.progressBar.setMaximumHeight(15)
         self.progressBar.setMinimum(0)
         self.progressBar.setMaximum(self.file_count)
         self.progressBar.setValue(0)
@@ -705,11 +764,8 @@ class EMIWindow(MainWindow):
         self.statusBar().showMessage(f"正在处理文件...{value}/{self.file_count}")
 
     def addZipToExcel(self, zipname, SaveFile):
-        try:
-            excel = win32.Dispatch("Excel.Application")
-            excel.Visible = True
-        except:
-            logger.error("Please install Microsoft Word 2010 or later.")
+        excel = self.open_Excel()
+        if excel is None:
             return
         try:
             wb = excel.Workbooks.Open(os.path.abspath(SaveFile))
@@ -740,6 +796,24 @@ class EMIWindow(MainWindow):
             logger.error(f"Error adding zip to Excel: {e}")
             QMessageBox.critical(self, "Error", f"Error adding zip to Excel: {e}")
 
+    def open_Excel(self):
+        while True:
+            try:
+                excel = win32.Dispatch("Excel.Application")
+                excel.Visible = True
+                return excel
+            except:
+                logger.error("Please install Microsoft Excel 2010 or later.")
+                reply = QMessageBox.information(
+                    self,
+                    self.tr("Excel打开失败"),
+                    self.tr("请安装 Microsoft Excel 2010或更新的版本。是否重试？"),
+                    QMessageBox.StandardButton.Yes,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply == QMessageBox.StandardButton.No:
+                    return None
+
     def zip_folder(self, directory, zipname):
         logger.info("Zipping folder...")
         file_count = 0
@@ -748,6 +822,7 @@ class EMIWindow(MainWindow):
                 if _file.endswith(".pdf"):
                     file_count += 1
         self.zip_progressBar = QProgressBar(self.statusBar_main)
+        self.zip_progressBar.setMaximumHeight(15)
         self.zip_progressBar.setMaximum(file_count)
         self.zip_progressBar.setMinimum(0)
         self.zip_progressBar.setValue(0)
