@@ -61,19 +61,24 @@ from naming import collect_name_tokens
 # --------------------------------------------------------------------------- #
 
 LOG_FILENAME = "EMIRper.log"
+APP_TITLE = "EMI-Report"  # 窗口标题前缀（后面跟随数据路径的文件夹名）
+APP_VERSION = "2.1"
 STATE_SAVE_DELAY_MS = 300  # 输入变化后延迟落盘的防抖时间
 SERIAL_REFRESH_DELAY_MS = 500  # 数据路径变化后延迟刷新序列号的防抖时间
 REPORT_FILE_SUFFIX = ".pdf"  # 提取序列号时依据的报告文件后缀
+VOLTAGE_KINDS = 2  # 模板中每个机种的电压档数（220V / 110V）
+PHASE_KINDS = 2  # 每档负载下的相线行数（Line / Neutral）
+MAX_NOTICE_ITEMS = 8  # 提示框内最多列出的条件条数
 TEMPLATE_DIR = "template"
-TEMPLATE_NAME_PATTERN = r"_\d\.xlsx"  # 模板名中的 "_3.xlsx" / "_4.xlsx"
+TEMPLATE_COUNT_PATTERN = r"_(\d+)\.xlsx$"  # 模板名里的数量后缀，如 _3.xlsx / _10.xlsx
 DEFAULT_LOAD_QTY = 3
-SUPPORTED_LOAD_QTY = (3, 4)
 MAX_UUT_COUNT = 5  # 模板支持的最大机种（负载类型）数量
 ROWS_PER_UUT_UNIT = 4  # 每个机种每档负载占用 4 行
 ROWS_PER_LOAD_STEP = 2  # 同一机种内每档负载间隔 2 行
 REPORT_TAIL_ROWS = 4  # 报告表格尾部的行数（计算数据结束行时扣除）
 EMPTY_MARK = "-"  # 数据行中固定填 "-" 的列
 LINE_LABELS = {"L1": "Line", "N": "Neutral"}
+PHASE_FILE_TOKENS = {label: token for token, label in LINE_LABELS.items()}
 
 # PDF 文本解析位置（行、列均从 0 起算）
 PDF_HEADER_LINE_LIMIT = 20  # Serial / Power / Load 出现在前若干行内
@@ -126,6 +131,11 @@ MEASUREMENT_CELL_SOURCES: tuple[tuple[int, int | None], ...] = (
 )
 
 
+def template_path_for(load_qty: int) -> str:
+    """按负载数量拼出 ``template/`` 下对应的模板路径（如 ``..._10.xlsx``）。"""
+    return os.path.join(TEMPLATE_DIR, f"2.1 Conducted EMI Measurement_{load_qty}.xlsx")
+
+
 class SettingItem(NamedTuple):
     """一条布尔型设置项的定义。"""
 
@@ -146,6 +156,53 @@ SETTING_ITEMS = (
         "是否在处理完毕后关闭excel程序，默认保留。",
         False,
     ),
+)
+
+# 「帮助 → 使用文档」窗口显示的正文（v + 版本号）
+HELP_DOCUMENT = (
+    "EMI-Report 使用文档（v" + APP_VERSION + "）\n"
+    "\n"
+    "一、准备\n"
+    "  1. 用 ELEKTRA 导出 EMI 报告 PDF，文件名保持「序列号-输入电压-负载-线性.pdf」。\n"
+    "  2. 把同一机种的报告放进同一个文件夹（建议文件夹名也用「序列号-机种」）。\n"
+    "  3. 本机需安装 Microsoft Word 与 Excel（转 PDF、嵌入压缩包时使用）。\n"
+    "\n"
+    "二、主界面操作\n"
+    "  1. 模版路径：可留空。留空时按「负载数量」自动选用\n"
+    "     template/2.1 Conducted EMI Measurement_{N}.xlsx（现有 _1 / _3 / _4 / _10）。\n"
+    "  2. 数据路径：选择存放 EMI PDF 的文件夹。选好后窗口标题会跟随该文件夹名，\n"
+    "     「序列号」区会自动列出文件名中「-」之前的序列号（去重），点击该区标签可刷新。\n"
+    "  3. 负载数量：需与模板档数一致（程序以模板文件名中的数字为准）。\n"
+    "  4. 测试日期 / 工令 / 版本 / 周期：写入报告表头。\n"
+    "  5. 测试图片：可选，鼠标悬停在输入框上可预览。\n"
+    "  6. 测试细节：点「点击此处获取」从模板读取，也可手工修改。\n"
+    "  7. 点「开始」：解析 PDF → 写入 Excel → 按设置生成 / 嵌入压缩包 → 弹出完成提示。\n"
+    "\n"
+    "三、数据完整性检查（写入后自动执行）\n"
+    "  按 (电压, 负载, 相线) 逐个条件检查数据行：\n"
+    "  · 某条件在所有序列号中都没有数据 → 视为未安排该测试：自动删除这些空行并提示；\n"
+    "  · 只有部分序列号缺数据，或某行只写了一部分 → 视为异常：程序会检查对应报告文件\n"
+    "    （缺失 / 存在但取不到数据）并警告，请补齐报告后重新运行。\n"
+    "\n"
+    "四、设置（选项 → 设置，Ctrl+I）\n"
+    "  · 生成压缩包：把数据目录下的 PDF 打成 zip；\n"
+    "  · 嵌入压缩包：把 zip 作为对象插入 Excel 报告；\n"
+    "  · 执行完毕关闭 Excel：默认不关闭，便于继续编辑。\n"
+    "\n"
+    "五、工具\n"
+    "  · docx转pdf（Ctrl+T）：选择目录或单个文件批量转 PDF，窗口会预览序列号与文件数量；\n"
+    "  · word替换（Ctrl+G）：点「原字符串集」标签可从源路径文件名提取序列号，\n"
+    "    点「目标字符串集」标签可把格式控制符整理为单个换行，随后按名称配对替换。\n"
+    "\n"
+    "六、日志与状态\n"
+    "  · 工具 → 查看日志（Ctrl+J）：可更新 / 清空 / 导出日志，出问题先看这里；\n"
+    "  · 输入内容与设置会自动保存，程序异常退出后重开自动恢复。\n"
+    "\n"
+    "七、输出与收尾\n"
+    "  · 报告与 zip 生成在「数据路径的上一级目录」，报告名为\n"
+    "    2.1 Conducted EMI Measurement_{型号}.xlsx；\n"
+    "  · 报告仍需人工补充：日期与测试者、限值标准（默认 Class B）、\n"
+    "    插入测试图片与压缩包、整理多余的表格项。\n"
 )
 
 # --------------------------------------------------------------------------- #
@@ -481,6 +538,16 @@ class EMIWindow(MainWindow):
             logger.info("序列号刷新: %d 个（%s）", len(serials), directory)
         else:
             logger.debug("序列号刷新: 未提取到序列号（%s）", directory)
+        self.update_window_title()
+
+    def update_window_title(self) -> None:
+        """窗口标题跟随数据路径最后一级文件夹名称。"""
+        directory = self.lineEdit_model.text().strip().rstrip("\\/")
+        folder_name = os.path.basename(directory) if directory else ""
+        title = f"{APP_TITLE} - {folder_name}" if folder_name else APP_TITLE
+        if title != self.windowTitle():
+            self.setWindowTitle(title)
+            logger.debug("窗口标题更新为: %s", title)
 
     def install_exception_hook(self) -> None:
         """未捕获异常时先落盘再走默认处理，保证异常退出也不丢输入。"""
@@ -700,7 +767,10 @@ class EMIWindow(MainWindow):
         window.setLayout(QVBoxLayout())
 
         label = QLabel(
-            text="EMI-Report\n\n版本：2.0\n\n作者：Lucas Li\n\n邮箱：Lucas_Li@acbel.com",
+            text=(
+                f"{APP_TITLE}\n\n版本：{APP_VERSION}\n\n"
+                "作者：Lucas Li\n\n邮箱：Lucas_Li@acbel.com"
+            ),
             alignment=Qt.AlignCenter,
         )
         label.setWordWrap(True)
@@ -712,17 +782,21 @@ class EMIWindow(MainWindow):
 
     def _build_helpdoc_window(self) -> QWidget:
         window = QWidget()
-        window.setWindowTitle("帮助文档")
+        window.setWindowTitle("使用文档")
         icon = QIcon()
         icon.addFile(":/emipdf/acbel -1.jpg", QSize(), QIcon.Normal, QIcon.Off)
         window.setWindowIcon(icon)
-        window.resize(800, 600)
-        window.setStyleSheet("QLabel { font-size: 15px; }")
-        window.setLayout(QVBoxLayout())
+        window.resize(820, 620)
 
-        label = QLabel(text="EMI-Report\n\n待补充...\n\n", alignment=Qt.AlignLeft)
-        label.setWordWrap(True)
-        window.layout().addWidget(label)
+        layout = QVBoxLayout(window)
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(HELP_DOCUMENT)
+        layout.addWidget(text)
+
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(window.close)
+        layout.addWidget(close_button)
         return window
 
     def show_done(self, save_file: str | None) -> None:
@@ -812,16 +886,15 @@ class EMIWindow(MainWindow):
         load_qty = self.spin_qty.value()
 
         if not template_file:
-            if load_qty not in SUPPORTED_LOAD_QTY:
+            template_file = template_path_for(load_qty)
+            if not os.path.exists(template_file):
                 logger.warning(
-                    "Unexpected load quantity: %s, defaulting to %s.",
+                    "未找到 %s 个负载对应的模板(%s)，回落到 %s 个负载的模板。",
                     load_qty,
+                    template_file,
                     DEFAULT_LOAD_QTY,
                 )
-                load_qty = DEFAULT_LOAD_QTY
-            template_file = os.path.join(
-                TEMPLATE_DIR, f"2.1 Conducted EMI Measurement_{load_qty}.xlsx"
-            )
+                template_file = template_path_for(DEFAULT_LOAD_QTY)
 
         if not os.path.exists(template_file):
             logger.warning("未找到模板文件: %s", template_file)
@@ -830,7 +903,7 @@ class EMIWindow(MainWindow):
                 return None
             template_file = selected
 
-        # 记录最终使用的模板路径（main_func 依赖它推导输出文件名）
+        # 记录最终使用的模板路径（main_func 依赖它推导输出文件名与负载数量）
         self.lineEdit_template.setText(os.path.abspath(template_file))
 
         try:
@@ -844,6 +917,16 @@ class EMIWindow(MainWindow):
             logger.exception("打开模板文件失败: %s", exc)
             QMessageBox.warning(self, "Error", f"Error opening template file: {exc}")
         return None
+
+    def template_load_qty(self, template_file: str) -> int:
+        """模板文件名中的数量后缀优先（``_10.xlsx`` → 10），否则用界面上的负载数量。
+
+        这样即使自动选模板时发生了回落，行数换算也与实际使用的模板一致。
+        """
+        match = re.search(TEMPLATE_COUNT_PATTERN, os.path.basename(template_file))
+        if match:
+            return int(match.group(1))
+        return self.spin_qty.value()
 
     def get_testdetail(self) -> None:
         """从模板的测试细节单元格读取内容填入界面。"""
@@ -869,12 +952,13 @@ class EMIWindow(MainWindow):
         """把解析结果写入模板并保存，随后按设置压缩、嵌入压缩包。"""
         started_at = time.perf_counter()
         model_dir = self.lineEdit_model.text()
-        load_qty = self.spin_qty.value()
 
         workbook = self.open_template()
         if workbook is None:
             return
         template_file = self.lineEdit_template.text()
+        # 负载数量以模板文件名为准（如 _10 → 10），避免与模板行结构不符
+        load_qty = self.template_load_qty(template_file)
 
         self._load_anchors(workbook[SETUP_SHEET_NAME])
         sheet = workbook[REPORT_SHEET_NAME]
@@ -921,9 +1005,10 @@ class EMIWindow(MainWindow):
 
         self._resize_report_rows(sheet, load_qty, uut_count)
         self._write_measurements(sheet, report_data, load_qty)
+        self._check_measurement_gaps(sheet, load_qty, uut_count, model_dir_name)
 
         save_file = re.sub(
-            TEMPLATE_NAME_PATTERN, f"_{uut_name}.xlsx", os.path.basename(template_file)
+            TEMPLATE_COUNT_PATTERN, f"_{uut_name}.xlsx", os.path.basename(template_file)
         )
         workbook.remove(workbook[SETUP_SHEET_NAME])
         workbook.save(save_file)
@@ -1085,6 +1170,214 @@ class EMIWindow(MainWindow):
             )
 
         logger.info("测量数据写入完成: 共 %d 份", len(report_data))
+
+    # ---- 数据完整性检查 -------------------------------------------------- #
+
+    def _collect_conditions(
+        self, sheet, load_qty: int, uut_count: int
+    ) -> list[tuple[tuple[int, int, int], tuple[Any, Any, Any], dict[str, int]]]:
+        """按 (电压档, 负载档, 相线) 条件枚举各序列号对应的数据行。
+
+        :return: ``[(条件键, (电压值, 负载值, 相线名), {序列号: 行号})]``
+        """
+        block_rows = load_qty * ROWS_PER_UUT_UNIT
+        conditions: dict[tuple[int, int, int], dict[str, int]] = {}
+        labels: dict[tuple[int, int, int], tuple[Any, Any, Any]] = {}
+
+        for sn_index in range(uut_count):
+            base_row = self.row_sn_ + sn_index * block_rows
+            serial_value = sheet.cell(row=base_row, column=self.col_sn_).value
+            serial = (
+                str(serial_value) if serial_value else f"第 {sn_index + 1} 个序列号"
+            )
+
+            for vol_index in range(VOLTAGE_KINDS):
+                vol_start = base_row + vol_index * load_qty * ROWS_PER_LOAD_STEP
+                for load_index in range(load_qty):
+                    load_row = vol_start + load_index * ROWS_PER_LOAD_STEP
+                    for phase_offset in range(PHASE_KINDS):
+                        row = load_row + phase_offset
+                        key = (vol_index, load_index, phase_offset)
+                        conditions.setdefault(key, {})[serial] = row
+                        labels.setdefault(
+                            key,
+                            (
+                                sheet.cell(row=vol_start, column=self.col_vol_).value,
+                                sheet.cell(row=load_row, column=self.col_load_).value,
+                                sheet.cell(row=row, column=self.col_line_).value,
+                            ),
+                        )
+
+        return [(key, labels[key], conditions[key]) for key in conditions]
+
+    def _row_state(self, sheet, row: int) -> str:
+        """数据行的填写状态：``empty``（未写入）/ ``full``（写满）/ ``partial``（只写了一部分）。
+
+        模板中固定填 ``-`` 的那一列不参与判断（它本来就预填了 ``-``）。
+        """
+        filled = 0
+        expected = 0
+        for offset, source_index in MEASUREMENT_CELL_SOURCES:
+            if source_index is None:
+                continue
+            expected += 1
+            if sheet.cell(row=row, column=self.col_load_ + offset).value is not None:
+                filled += 1
+
+        if filled == 0:
+            return "empty"
+        if filled == expected:
+            return "full"
+        return "partial"
+
+    @staticmethod
+    def _condition_text(voltage: Any, load: Any, phase: Any) -> str:
+        """把条件值格式化成便于阅读的文本，如 ``220V / 50% / Neutral``。"""
+        parts = []
+        if voltage is not None:
+            parts.append(f"{int(float(voltage))}V")
+        if load is not None:
+            parts.append(f"{int(round(float(load) * 100))}%")
+        if phase is not None:
+            parts.append(str(phase))
+        return " / ".join(parts) or "（未知条件）"
+
+    @staticmethod
+    def _format_notice(items: list[str]) -> str:
+        """拼提示文本，最多列 MAX_NOTICE_ITEMS 条。"""
+        shown = items[:MAX_NOTICE_ITEMS]
+        text = "\n".join(f"· {item}" for item in shown)
+        if len(items) > len(shown):
+            text += f"\n……等共 {len(items)} 项"
+        return text
+
+    @staticmethod
+    def _expected_report_tokens(
+        voltage: Any, load: Any, phase: Any
+    ) -> tuple[str, str, str]:
+        """把模板中的电压 / 负载 / 相线值换算成报告文件名里的片段。"""
+        voltage_token = f"{int(float(voltage))}V" if voltage is not None else ""
+        load_token = f"{int(round(float(load) * 100))}%" if load is not None else ""
+        phase_token = PHASE_FILE_TOKENS.get(str(phase), str(phase))
+        return voltage_token, load_token, phase_token
+
+    def _diagnose_missing_report(
+        self, model_dir: str, serial: str, voltage: Any, load: Any, phase: Any
+    ) -> str:
+        """缺失条件时，检查数据目录里对应报告文件的情况。"""
+        if not os.path.isdir(model_dir):
+            return f"数据目录不存在（{model_dir}）"
+        try:
+            names = os.listdir(model_dir)
+        except OSError as exc:
+            return f"无法读取数据目录（{exc}）"
+
+        pdfs = [name for name in names if name.lower().endswith(REPORT_FILE_SUFFIX)]
+        serial_pdfs = [name for name in pdfs if name.startswith(f"{serial}-")]
+        if not serial_pdfs:
+            return "数据目录里没有以该序列号开头的报告文件"
+
+        voltage_token, load_token, phase_token = self._expected_report_tokens(
+            voltage, load, phase
+        )
+        matched = [
+            name
+            for name in serial_pdfs
+            if voltage_token in name and load_token in name and phase_token in name
+        ]
+        if matched:
+            return f"报告文件存在（{matched[0]}）但未能取到数据，可能是内容解析失败"
+        return (
+            f"缺少对应报告文件（该序列号已有 {len(serial_pdfs)} 份报告，"
+            f"未找到含 {voltage_token}/{load_token}/{phase_token} 的文件）"
+        )
+
+    def _cleanup_orphan_merges(self, sheet) -> None:
+        """清理落在表格之外的残留合并区域（删行后模板可能遗留）。"""
+        limit = self.row_end_ + REPORT_TAIL_ROWS
+        orphans = [rng.coord for rng in sheet.merged_cells if rng.min_row > limit]
+        for coord in orphans:
+            try:
+                sheet.unmerge_cells(coord)
+            except KeyError:
+                # 该区域的单元格已随删行消失，合并记录已移除即可
+                logger.debug("跳过已失效的合并区域: %s", coord)
+
+    def _check_measurement_gaps(
+        self, sheet, load_qty: int, uut_count: int, model_dir: str
+    ) -> None:
+        """检查数据填入区域的空条件。
+
+        - 某个 (电压, 负载, 相线) 条件在所有序列号中都没有数据：视为未安排该测试的正常情况，
+          删除这些空行并简要提示；
+        - 只有部分序列号缺数据、或某行只写了一部分列：视为异常，检查数据目录中对应的
+          报告文件情况并告警。
+        """
+        conditions = self._collect_conditions(sheet, load_qty, uut_count)
+        removable_rows: list[int] = []
+        normal_conditions: list[str] = []
+        abnormal_items: list[str] = []
+
+        for _key, (voltage, load, phase), rows_by_serial in conditions:
+            states = {
+                serial: self._row_state(sheet, row)
+                for serial, row in rows_by_serial.items()
+            }
+            condition_text = self._condition_text(voltage, load, phase)
+            empty_serials = [s for s, state in states.items() if state == "empty"]
+            partial_serials = [s for s, state in states.items() if state == "partial"]
+
+            if partial_serials:
+                abnormal_items.append(
+                    f"{condition_text}：{', '.join(partial_serials)} 的数据不完整"
+                )
+            elif not empty_serials:
+                continue
+            elif len(empty_serials) == len(states):
+                normal_conditions.append(condition_text)
+                removable_rows.extend(rows_by_serial.values())
+            else:
+                for serial in empty_serials:
+                    reason = self._diagnose_missing_report(
+                        model_dir, serial, voltage, load, phase
+                    )
+                    abnormal_items.append(
+                        f"{condition_text}：{serial} 缺少数据（{reason}）"
+                    )
+
+        if normal_conditions:
+            logger.info(
+                "以下条件在所有序列号中都没有数据，视为未测试并删除对应行: %s",
+                normal_conditions,
+            )
+        for item in abnormal_items:
+            logger.warning("数据缺失: %s", item)
+
+        if removable_rows:
+            for row in sorted(removable_rows, reverse=True):
+                sheet.delete_rows(row, 1)
+            self.row_end_ = sheet.max_row - REPORT_TAIL_ROWS
+            self._cleanup_orphan_merges(sheet)
+            logger.info(
+                "已删除 %d 个空条件行，数据结束行更新为 %s",
+                len(removable_rows),
+                self.row_end_,
+            )
+
+        if normal_conditions:
+            QMessageBox.information(
+                self,
+                self.tr("提示"),
+                "以下条件在所有序列号中都没有数据（视为未测试），已删除对应行：\n"
+                + self._format_notice(normal_conditions),
+            )
+        if abnormal_items:
+            QMessageBox.warning(
+                self,
+                self.tr("数据缺失警告"),
+                "以下条件的数据不完整，请检查对应报告：\n"
+                + self._format_notice(abnormal_items),
+            )
 
     # ---- PDF 解析调度 ---------------------------------------------------- #
 

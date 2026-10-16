@@ -3,7 +3,7 @@
 EMI 传导骚扰（Conducted EMI）测试报告自动化工具：把 ELEKTRA 导出的 EMI PDF 报告解析成数据，按模板写入 Excel，并生成 / 嵌入原始 PDF 压缩包，产出一份可直接继续整理的报告底稿。界面基于 PySide6（QMainWindow + QThread）。
 
 - 主入口：[src/EMI-Report.py](src/EMI-Report.py)，窗口标题 `EMI-Report`
-- 版本：`2.0`（显示在「帮助 → 关于」窗口），变更历史见 [CHANGELOG.md](CHANGELOG.md)
+- 版本：`2.1`（显示在「帮助 → 关于」窗口），变更历史见 [CHANGELOG.md](CHANGELOG.md)
 - 作者：`Lucas Li`（Lucas_Li@acbel.com）
 - 面向使用者的说明：[使用须知/使用须知.md](使用须知/使用须知.md)
 - 远程仓库：https://github.com/yooxii/EMI_deal.git
@@ -16,9 +16,9 @@ EMI 传导骚扰（Conducted EMI）测试报告自动化工具：把 ELEKTRA 导
 | --- | --- |
 | 远程 | `https://github.com/yooxii/EMI_deal.git`（origin） |
 | 当前分支 | `master` |
-| 当前提交 | `2.0` 版本提交（此前基线为 `c1dc25e`，2026-01-06） |
-| 与远程关系 | `2.0` 版本提交后与 `origin/master` 同步 |
-| 提交总数 | 13（含 `2.0` 版本提交） |
+| 当前提交 | `2.1` 版本提交（此前基线为 `c1dc25e`，2026-01-06） |
+| 与远程关系 | `2.1` 版本提交后与 `origin/master` 同步 |
+| 提交总数 | 14（含 `2.0` / `2.1` 版本提交） |
 | 工作区 | `2.0` 的改动已提交；`DealPdf.log` 被 `.gitignore` 忽略 |
 | 工作树 | 单一工作树 `E:/Desktop/Code/ORT/EMI_deal`，无 stash、无 tag |
 | 版本要求 | `.python-version` → `3.8`；`pyproject.toml` → `requires-python = ">=3.8"`；依赖由 `uv` 管理，索引为清华源 |
@@ -50,10 +50,13 @@ EMI_deal/
 │     ├─ docx2pdf.ui                # 旧 docx2pdf 界面
 │     ├─ acbel_logo.jpg / acbel_logo_s.jpg / acbel-1.jpg
 │     └─ __init__.py
-├─ template/                        # Excel 报告模板（3 份，含 Setup 参数表）
-│  ├─ 2.1 Conducted EMI Measurement_3.xlsx
-│  ├─ 2.1 Conducted EMI Measurement_4.xlsx
-│  └─ 2.1 Conducted EMI Measurement_Vdc.xlsx
+├─ template/                        # Excel 报告模板（含 Setup 参数表）
+│  ├─ 2.1 Conducted EMI Measurement_1.xlsx     # 1 档负载（每机种 4 行）
+│  ├─ 2.1 Conducted EMI Measurement_3.xlsx     # 3 档负载（每机种 12 行）
+│  ├─ 2.1 Conducted EMI Measurement_4.xlsx     # 4 档负载（每机种 16 行）
+│  ├─ 2.1 Conducted EMI Measurement_10.xlsx    # 10 档负载（每机种 40 行）
+│  ├─ 2.1 Conducted EMI Measurement_AMZ.xlsx   # 客户专用版式（需手动指定）
+│  └─ 2.1 Conducted EMI Measurement_Vdc.xlsx   # 直流版式（需手动指定）
 ├─ logo/                            # 打包图标与图片源（acbel-1.jpg 等）
 ├─ 使用须知/                        # 使用须知.md + 4 张示例截图
 ├─ .vscode/                         # launch.json（调试）/ tasks.json（uv run 任务）/ settings.json
@@ -89,12 +92,14 @@ EMI_deal/
 | 日志视图 | `update_log`、`export_log`、`clear_log` |
 | 模板 | `open_template`（按负载数量拼模板名、缺失时弹选择框、返回 workbook）、`get_testdetail`（读 `Conducted EMI!F8` 作为测试细节） |
 | 主流程 | `main_func`（编排：`_write_header` / `_insert_test_image` / `_resize_report_rows` / `_write_measurements`，再保存并触发压缩）、`getpdfdatas`（起解析线程 + 状态栏进度条，`getpdf_running` 防重入）、`onProcessingFinished`、`onProcessingError`、`updateProgressBar` |
+| 数据完整性 | `_collect_conditions`（枚举各 (电压, 负载, 相线) 条件对应的行）、`_row_state`（行填写状态）、`_check_measurement_gaps`（全序列号同缺则删行并提示，部分缺则告警）、`_diagnose_missing_report`（检查对应报告）、`_cleanup_orphan_merges`（清理残留合并区域） |
 | 压缩与嵌入 | `zip_folder`、`updateZipProgressBar`、`onZipFinished`、`onZipError`、`add_zip_to_excel`、`open_excel`（Excel COM 失败时循环询问是否重试） |
 
 ### 3.2 [src/gui/mainWin.py](src/gui/mainWin.py) — 主界面
 
 - `HoverLineEdit(QLineEdit)`：鼠标进入时在其右上角弹出无边框预览窗口，把文本当作图片路径 `QPixmap` 缩放显示；用于“测试图片”输入框。
 - `MainWindow(QMainWindow)`：`setupUi` → `setMainWidget` + `setMainMenu`，全部界面用代码搭建（无 `.ui` 文件、无 `ui_*.py` 生成物）。
+- 窗口标题跟随数据路径最后一级文件夹名（`EMI-Report - <文件夹名>`，路径为空时回到 `EMI-Report`），由 `EMIWindow.update_window_title` 在刷新序列号时一并更新。
 
 界面控件：
 
@@ -124,6 +129,7 @@ EMI_deal/
 - `ConvertThread(QThread)`：用 `win32com` 打开 Word（隐藏窗口），把选中的 `.docx` 文件或目录内全部 `.docx` 另存为 PDF（`FileFormat=17`）；信号 `docx_count` / `docx_curr` / `docx_end` / `docx_error` / `docx_warning`；中断用 `requestInterruption()` + `isInterruptionRequested()`（不使用 `QThread.terminate()`）。
 - `Ui_Docx2PdfWin`：界面构建（<s>Designer 生成物</s> 已改写为手写类）。
 - `Docx2PdfWindow(Ui_Docx2PdfWin)`：路径选择（目录 / 单文件）、`running` 防重入、状态栏进度条、关闭时请求中断线程。
+- 预览区（`label_preview` + `text_preview`）：显示所选路径下 docx 文件名中「-」之前的序列号（去重）与 docx 文件数量；路径变化后 300 ms 防抖自动刷新，点击标签立即刷新。
 
 ### 3.4 [src/gui/ui_wordreplace.py](src/gui/ui_wordreplace.py) — Word 替换子窗口
 
@@ -191,13 +197,16 @@ EMI_deal/
 ## 5. 端到端流程
 
 1. **准备数据**：同一机种的 EMI PDF 报告放在以机种命名的文件夹内，文件名遵循 `序列号-输入电压-负载-线性.pdf`（软件版本 ELEKTRA 4.52.1 导出）。
-2. **选择路径**：`数据路径` 指向该机种文件夹，此时「序列号」区会自动列出该文件夹内报告文件名「-」之前的序列号（去重）；`模版路径` 可留空，留空时按 `负载数量` 自动使用 `template/2.1 Conducted EMI Measurement_{3|4}.xlsx`，数量不是 3/4 时回落 `_3`。
+2. **选择路径**：`数据路径` 指向该机种文件夹，此时「序列号」区会自动列出该文件夹内报告文件名「-」之前的序列号（去重）；`模版路径` 可留空，留空时按 `负载数量` 自动使用 `template/2.1 Conducted EMI Measurement_{N}.xlsx`（现有 `_1` / `_3` / `_4` / `_10`），对应模板不存在时回落到 `_3` 并记 WARNING。写入时的行数换算以模板文件名中的数量为准，避免与模板行结构不符。
 3. **补充信息**：`点击此处获取` 从模板 `Conducted EMI!F8` 读出测试细节填入文本框；另外填写测试日期、工令、版本、周期（D/C），可选测试图片。
 4. **解析 PDF**（`ProcessPdfThread`）：逐份读取前两页文本 → 前 20 行中抓 `Serial` / `Power` / `Load` → 第 15 行之后取列数 > 10 的行作为数据行，并把每行第 1 列重编号为序号 → 分别按 AVG（第 8 列）与 PK（第 5 列）升序排序，取两者较小者所在的排序，用排序后的第 1 行作为该 PDF 的代表行。
 5. **写入 Excel**（`main_func`）：读取 `Setup` 表锚点 → 写表头 `F5` 单体型号（目录名前两段）、`F6` 测试日期、`F8` 测试细节、`F44` 工令、`H44` 版本、`I44` 周期 → 若图片存在，用 PIL 等比缩放到高 250 px 并转 JPEG，经 `openpyxl.drawing.image` 插入 `C27` → 按实际 UUT 数与负载数量反推需要删除的行数并 `delete_rows` → 按 Serial / 电压 / 负载 / 线性逐级定位，写入 7 列数据（第 5 列固定写 `-`）。
-6. **保存**：文件名为 `2.1 Conducted EMI Measurement_{型号}.xlsx`，保存前 `wb.remove(ws_setup)` 删除 `Setup` 表。
-7. **压缩与嵌入**：`生成压缩包` 打开时用 ZIP_LZMA 把目录下所有 PDF 压成 `{型号}.zip`（带进度条）；`嵌入压缩包` 打开时用 Excel COM 打开刚保存的 xlsx，在 `Conducted EMI` 表插入该 zip 为 OLE 对象并补齐边框；`执行完毕关闭Excel` 决定是否随即退出 Excel。
-8. **完成提示**：`show_done` 列出仍需人工完成的 4 步——填写日期与测试者（注意 MP / MVT）、核对限值标准（默认 Class B）、插入测试图片与压缩包、删除多余项。
+6. **数据完整性检查**（`_check_measurement_gaps`）：写入完成后逐个检查 (电压, 负载, 相线) 条件在**所有序列号**中对应数据行的填写情况——
+   - 某条件在所有序列号中都没有数据：视为未安排该测试的正常情况，删除这些空行并给出提示；
+   - 只有部分序列号缺数据、或某行只写了一部分列：视为异常，检查数据目录里对应报告文件的情况（报告缺失 / 报告存在但未能取到数据）并给出警告。
+7. **保存**：文件名为 `2.1 Conducted EMI Measurement_{型号}.xlsx`，保存前 `wb.remove(ws_setup)` 删除 `Setup` 表。
+8. **压缩与嵌入**：`生成压缩包` 打开时用 ZIP_LZMA 把目录下所有 PDF 压成 `{型号}.zip`（带进度条）；`嵌入压缩包` 打开时用 Excel COM 打开刚保存的 xlsx，在 `Conducted EMI` 表插入该 zip 为 OLE 对象并补齐边框；`执行完毕关闭Excel` 决定是否随即退出 Excel。
+9. **完成提示**：`show_done` 列出仍需人工完成的 4 步——填写日期与测试者（注意 MP / MVT）、核对限值标准（默认 Class B）、插入测试图片与压缩包、删除多余项。
 
 > **目录变化提醒**：`main_func` 会 `os.chdir` 到“所选数据文件夹的父目录”。因此生成的 Excel 与 zip 都落在**所选数据文件夹的上一级目录**（同一机种文件夹之外），后续相对路径（日志、zip 名）都以该工作目录为基准。
 
@@ -221,7 +230,7 @@ EMI_deal/
 - 报告区每个 UUT 占 `负载数量 × 4` 行（3 负载 → 12 行），SN 行从 44 起；数据从 `负载列 + 1` 起连续写 7 列。
 - 模板 `Conducted EMI` 表尺寸：`_3` 为 `A1:AA107`、`_4` 为 `A1:AA127`、`_Vdc` 为 `A1:AA107`，均含百余个合并单元格（程序按需取消合并与删行）。
 - 保存前会删除 `Setup` 表，所以输出文件只有 `Conducted EMI`。
-- `_Vdc` 模板文件名不以 `_3` / `_4` 结尾，不会被自动选中，需在界面手动指定。
+- 模板名里的数字后缀决定自动选择与行数换算：`_1` / `_3` / `_4` / `_10` 分别对应 1 / 3 / 4 / 10 档负载；模板文件名不含数字后缀时（如 `_Vdc`、`_AMZ`）不会被自动选中，需在界面手动指定，此时负载数量取界面值。
 - 若手动指定了自定义模板且文件名不含 `_数字.xlsx`，输出文件名不会被替换成型号名（沿用模板文件名）。
 
 ## 7. 日志与配置
@@ -244,6 +253,7 @@ EMI_deal/
 | 序列号 | 数据路径变化或点击标签刷新后，记录提取到的序列号数量与来源目录（无结果时记 DEBUG） |
 | 模板 | 选中模板路径、模板缺失或打开失败的 WARNING / 异常 |
 | 报告写入 | 生成参数（目录 / 模板 / 负载数量 / 报告份数 / 设置开关）、表头各字段实际值、未选图片或图片缺失或插入失败、行调整明细（机种数 / 删除范围 / 数据结束行）、逐份定位结果（DEBUG）、写入汇总、保存路径与总用时 |
+| 数据完整性 | 全序列号同缺的条件（INFO，含删除行数与新的数据结束行）、部分序列号缺数据或数据不完整的条件及其报告诊断结果（WARNING） |
 | 压缩与嵌入 | 压缩文件数、输出包名与压缩包大小、取消工作表保护、嵌入完成、按设置关闭 Excel |
 | 子窗口 | 窗口初始化、选择的目录 / 文件、启动参数、逐份替换明细（DEBUG）、转换与替换汇总（成功 / 失败） |
 | 界面状态 | 恢复与保存的路径、保存失败 WARNING |
@@ -261,7 +271,7 @@ EMI_deal/
 5. `qt-material` 已无实际使用，可从依赖中移除。
 6. `src/test.py` 与 `src/gui/ui_wordreplace.py` 的 `test()` 中写死了本机路径（`D:\Desktop_Li\...`）。
 7. 日志路径与输出文件都基于当前工作目录，而主流程会 `os.chdir`，跨盘或只读目录场景需注意。
-8. 帮助菜单“使用文档”仍是“待补充”；`使用须知/使用须知.md` 中描述的 `deal_pdf.exe` 现已更名为 `EMIRper`。
+8. `使用须知/使用须知.md` 中描述的 `deal_pdf.exe` 现已更名为 `EMIRper`；面向使用者的完整说明已内置到程序「帮助 → 使用文档」。
 9. 项目当前没有自动化测试。
 
 ## 9. 代码规范与工具链

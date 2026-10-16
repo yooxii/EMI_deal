@@ -10,7 +10,15 @@ import logging
 import os
 
 import win32com.client as win32
-from PySide6.QtCore import QCoreApplication, QMetaObject, QSize, QThread, Signal, Slot
+from PySide6.QtCore import (
+    QCoreApplication,
+    QMetaObject,
+    QSize,
+    QThread,
+    QTimer,
+    Signal,
+    Slot,
+)
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -25,14 +33,22 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpacerItem,
     QStatusBar,
+    QTextEdit,
+    QVBoxLayout,
     QWidget,
 )
+
+from gui.widgets import ClickableLabel
+from naming import collect_name_tokens, count_report_files
 
 logger = logging.getLogger(__name__)
 
 PDF_FILE_FORMAT = 17  # Word 的 wdFormatPDF
 STATUS_BAR_HEIGHT = 15
 INTERRUPT_WAIT_MS = 5000
+DOCX_SUFFIX = ".docx"
+PREVIEW_REFRESH_DELAY_MS = 300  # 路径变化后延迟刷新预览的防抖时间
+PREVIEW_VIEW_HEIGHT = 50
 
 
 class ConvertThread(QThread):
@@ -105,7 +121,7 @@ class Ui_Docx2PdfWin(QMainWindow):
     def setupUi(self, Docx2PdfWin: QWidget) -> None:
         if not Docx2PdfWin.objectName():
             Docx2PdfWin.setObjectName("Docx2PdfWin")
-        Docx2PdfWin.resize(600, 160)
+        Docx2PdfWin.resize(600, 240)
         icon = QIcon()
         icon.addFile(":/emipdf/acbel -1.jpg", QSize(), QIcon.Normal, QIcon.Off)
         Docx2PdfWin.setWindowIcon(icon)
@@ -148,6 +164,28 @@ class Ui_Docx2PdfWin(QMainWindow):
 
         self.gridLayout_2.addLayout(self.gridLayout, 0, 0, 1, 1)
 
+        # 预览区：显示从文件名提取的序列号与 docx 数量（点击标签刷新）
+        preview_layout = QVBoxLayout()
+        self.label_preview = ClickableLabel(
+            QCoreApplication.translate("Docx2PdfWin", "预览（点击刷新）", None)
+        )
+        self.label_preview.setToolTip(
+            QCoreApplication.translate(
+                "Docx2PdfWin",
+                "显示所选路径下 docx 文件名中「-」之前的序列号（去重）与文件数量。",
+                None,
+            )
+        )
+        preview_layout.addWidget(self.label_preview)
+
+        self.text_preview = QTextEdit()
+        self.text_preview.setObjectName("text_preview")
+        self.text_preview.setReadOnly(True)
+        self.text_preview.setFixedHeight(PREVIEW_VIEW_HEIGHT)
+        preview_layout.addWidget(self.text_preview)
+
+        self.gridLayout_2.addLayout(preview_layout, 1, 0, 1, 1)
+
         self.horizontalLayout = QHBoxLayout()
         self.horizontalLayout.setObjectName("horizontalLayout")
         self.horizontalSpacer = QSpacerItem(
@@ -176,7 +214,7 @@ class Ui_Docx2PdfWin(QMainWindow):
         )
         self.horizontalLayout.addItem(self.horizontalSpacer_2)
 
-        self.gridLayout_2.addLayout(self.horizontalLayout, 1, 0, 1, 1)
+        self.gridLayout_2.addLayout(self.horizontalLayout, 2, 0, 1, 1)
 
         Docx2PdfWin.setCentralWidget(self.centralwidget)
         self.statusBar_docx = QStatusBar(Docx2PdfWin)
@@ -243,7 +281,42 @@ class Docx2PdfWindow(Ui_Docx2PdfWin):
         )
         self.btn_docx2pdf.clicked.connect(self.start_convert)
 
+        self.preview_timer = QTimer(self)
+        self.preview_timer.setSingleShot(True)
+        self.preview_timer.setInterval(PREVIEW_REFRESH_DELAY_MS)
+        self.preview_timer.timeout.connect(self.refresh_preview)
+        self.textEdit_docx.textChanged.connect(self._schedule_preview_refresh)
+        self.label_preview.clicked.connect(self.refresh_preview)
+        self.refresh_preview()
+
         logger.info("DOCX 转换窗口初始化完成")
+
+    def _schedule_preview_refresh(self, *_args) -> None:
+        """路径变化后延迟刷新预览，避免边输入边读目录。"""
+        self.preview_timer.start()
+
+    def refresh_preview(self, *_args) -> None:
+        """预览所选路径下的序列号与 docx 数量。"""
+        path = self.textEdit_docx.text().strip()
+        if not path:
+            self.text_preview.setPlainText("未选择路径。")
+            return
+        if not os.path.exists(path):
+            self.text_preview.setPlainText(f"路径不存在：{path}")
+            return
+
+        serials = collect_name_tokens(path, DOCX_SUFFIX)
+        file_count = count_report_files(path, DOCX_SUFFIX)
+        serial_text = "、".join(serials) if serials else "（未提取到序列号）"
+        self.text_preview.setPlainText(
+            f"序列号（{len(serials)}）：{serial_text}\n文件数量：{file_count} 个 docx"
+        )
+        logger.debug(
+            "预览刷新: 路径=%s, 序列号=%d, docx 文件数=%d",
+            path,
+            len(serials),
+            file_count,
+        )
 
     def select_docx_path(self, is_dir: bool = True) -> None:
         """选择待转换的目录或单个 docx 文件。"""

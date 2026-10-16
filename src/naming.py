@@ -20,36 +20,47 @@ def name_token(filename: str, separator: str = DEFAULT_SEPARATOR) -> str:
     return stem.split(separator)[0].strip()
 
 
-def collect_name_tokens(
-    path: str, suffix: str, separator: str = DEFAULT_SEPARATOR
-) -> list[str]:
-    """收集文件夹（或单个文件）内文件名首段，按出现顺序去重。
+def list_report_names(path: str, suffix: str) -> list[str]:
+    """列出文件夹（或单个文件）内匹配后缀的文件名，按名称排序。
 
     :param path: 文件夹路径或单个文件路径
     :param suffix: 需要匹配的扩展名，例如 ``.pdf`` / ``.docx``（大小写不敏感）
-    :param separator: 名称分隔符，默认为 ``-``
-    :return: 去重后的名称首段列表；路径无效时返回空列表
+    :return: 匹配到的文件名列表；路径无效时返回空列表
     """
     if not path:
         return []
 
     if os.path.isfile(path):
-        names = [os.path.basename(path)]
-    elif os.path.isdir(path):
-        names = sorted(
-            name for name in os.listdir(path) if name.lower().endswith(suffix.lower())
-        )
-    else:
-        logger.warning("路径不存在，无法提取名称: %s", path)
+        return [os.path.basename(path)]
+
+    if not os.path.isdir(path):
+        logger.warning("路径不存在，无法读取文件名: %s", path)
         return []
 
+    names = sorted(
+        name for name in os.listdir(path) if name.lower().endswith(suffix.lower())
+    )
     if not names:
         logger.warning("路径下没有 %s 文件: %s", suffix, path)
+    return names
 
+
+def collect_name_tokens(
+    path: str, suffix: str, separator: str = DEFAULT_SEPARATOR
+) -> list[str]:
+    """收集文件夹（或单个文件）内文件名首段，按出现顺序去重。
+
+    :return: 去重后的名称首段列表；路径无效时返回空列表
+    """
     tokens: list[str] = []
-    for name in names:
+    for name in list_report_names(path, suffix):
         token = name_token(name, separator)
         if token and token not in tokens:
             tokens.append(token)
     logger.debug("从 %s 提取到 %d 个名称片段: %s", path, len(tokens), tokens)
     return tokens
+
+
+def count_report_files(path: str, suffix: str) -> int:
+    """统计文件夹（或单个文件）内匹配后缀的文件数量。"""
+    return len(list_report_names(path, suffix))
