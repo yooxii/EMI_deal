@@ -74,7 +74,7 @@ from naming import collect_name_tokens
 
 LOG_FILENAME = "EMIRper.log"
 APP_TITLE = "EMI-Report"  # 窗口标题前缀（后面跟随数据路径的文件夹名）
-APP_VERSION = "2.4"
+APP_VERSION = "2.5"
 STATE_SAVE_DELAY_MS = 300  # 输入变化后延迟落盘的防抖时间
 SERIAL_REFRESH_DELAY_MS = 500  # 数据路径变化后延迟刷新序列号的防抖时间
 REPORT_FILE_SUFFIX = ".pdf"  # 提取序列号时依据的报告文件后缀

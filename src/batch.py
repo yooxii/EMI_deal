@@ -234,6 +234,56 @@ def ensure_pdfs(data_dir: str, serials: Sequence[str]) -> int:
     return converted
 
 
+def prepare_replaced_data(job: dict[str, Any]) -> tuple[str, str]:
+    """按 ``replace_map`` 用 Word 替换工具改写 docx，输出到临时目录。
+
+    返回 ``(工作目录, 临时目录)``。源数据目录只读，不会被改动；
+    替换后的 docx 文件名与内容都会变成目标序列号（供 docx→pdf 与报告生成使用）。
+    """
+    src = os.path.abspath(job["data_dir"])
+    if not os.path.isdir(src):
+        raise RuntimeError("替换源目录不存在: %s" % src)
+    mapping = job.get("replace_map") or {}
+    pairs = list(mapping.items()) if isinstance(mapping, dict) else [
+        (str(a), str(b)) for a, b in mapping
+    ]
+    if not pairs:
+        raise RuntimeError("replace_map 为空")
+    olds = [old for old, _ in pairs]
+    news = [new for _, new in pairs]
+
+    model = os.path.basename(src.rstrip("\\/"))
+    temp_root = tempfile.mkdtemp(prefix="emi_repl_")
+    work_dir = os.path.join(temp_root, model)
+    os.makedirs(work_dir, exist_ok=True)
+
+    from gui.ui_wordreplace import replace_text_in_docx
+
+    docx_names = [n for n in os.listdir(src) if n.lower().endswith(".docx")]
+    logger.info(
+        "Word 替换: 源=%s, docx=%d 份, 字符串组=%d -> %s",
+        src,
+        len(docx_names),
+        len(pairs),
+        work_dir,
+    )
+    for name in docx_names:
+        new_name = name
+        for old, new in pairs:
+            new_name = new_name.replace(old, new)
+        replace_text_in_docx(
+            os.path.join(src, name), os.path.join(work_dir, new_name), olds, news
+        )
+
+    # 源目录可能还含别的序列号（替换后仍是原样），只保留目标序列号，避免机种数超限
+    keep = {str(s).strip() for s in (job.get("serials") or []) if str(s).strip()}
+    keep = keep or set(news)
+    for name in os.listdir(work_dir):
+        if name.split("-")[0].strip() not in keep:
+            os.remove(os.path.join(work_dir, name))
+    return work_dir, temp_root
+
+
 def strip_model_suffix(filename: str, model: str) -> str:
     """去掉输出文件名末尾的下划线与机种名（``..._FSF059-00CG.xlsx`` → ``....xlsx``）。"""
     stem, ext = os.path.splitext(filename)
@@ -254,11 +304,17 @@ def run_job(main_mod: Any, win: Any, job: dict[str, Any], dry_run: bool = False)
 
     os.chdir(REPO_ROOT)
     converted = 0
-    if job.get("docx2pdf", True):
-        converted = ensure_pdfs(
-            os.path.abspath(job["data_dir"]), job.get("serials") or []
-        )
-    work_dir, temp_root = prepare_workspace(job)
+    if job.get("replace_map"):
+        # 借用其它周期的同名机种数据：先 Word 替换序列号，再转 PDF
+        work_dir, temp_root = prepare_replaced_data(job)
+        if job.get("docx2pdf", True):
+            converted = ensure_pdfs(work_dir, job.get("serials") or [])
+    else:
+        if job.get("docx2pdf", True):
+            converted = ensure_pdfs(
+                os.path.abspath(job["data_dir"]), job.get("serials") or []
+            )
+        work_dir, temp_root = prepare_workspace(job)
     try:
         os.chdir(REPO_ROOT)
         report_data = main_mod.ProcessPdfThread(work_dir).deal_dirs(work_dir)

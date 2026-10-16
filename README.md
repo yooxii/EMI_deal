@@ -192,6 +192,7 @@ EMI_deal/
 | 写出与归档 | 调 `main_func` 后取 `save_file_name`，按 `out_dir` / `out_name` 归档；目标已有同名文件时先改名为 `*.bak-<时间戳>.xlsx` 再覆盖 |
 | 压缩与嵌入 | `zip` 时同步调 `ZipThread(...).zip_folder()`；`embed` 时调 `add_zip_to_excel(..., close_workbook=True, visible=False)`（需本机 Excel，嵌入后立即关闭本次打开的工作簿、不单独保留压缩包） |
 | 补数据 | 数据目录里只有 docx 没有 PDF 时，用 `docx2pdf.convert_docx_files()` 单线程转换（只转作业关心的序列号，且不关掉用户已打开的 Word 文档） |
+| 借用别的周期数据 | 作业给了 `replace_map` 时，先用 `gui.ui_wordreplace.replace_text_in_docx()` 把源目录 docx 改名/改写内容到临时目录（源目录只读），按目标序列号过滤后再转 PDF、出报告 |
 | 退出 | 输出落盘后 `os._exit(code)`：离屏 Qt 对象在解释器析构阶段会触发堆损坏（`0xC0000374`） |
 
 ## 4. 运行、调试与打包
@@ -450,7 +451,8 @@ uv tool run ruff check --fix src     # 自动修复可修复项
 
 | 字段 | 说明 |
 | --- | --- |
-| `data_dir` | 必填，存放该机种 EMI PDF 的目录（GUI 里的「数据路径」） |
+| `data_dir` | 必填，存放该机种 EMI PDF（或 docx）的目录（GUI 里的「数据路径」） |
+| `replace_map` | 可选，`{"源序列号": "目标序列号"}`：先用 Word 替换工具把源目录的 docx 改名/改写内容到临时目录，再转 PDF 出报告（源目录只读）。用于借用别的周期同名机种数据的场景 |
 | `serials` | 可选但建议填：只使用这些序列号的 PDF；不填则该目录下的 PDF 全部使用（超过模板 5 个机种块会失败） |
 | `template` | 可选，留空按 `load_qty` 取 `template/2.1 Conducted EMI Measurement_{N}.xlsx` |
 | `load_qty` | 可选，负载档数（默认 3）；实际行数换算以模板文件名里的数字为准 |
