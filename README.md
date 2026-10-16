@@ -191,8 +191,8 @@ EMI_deal/
 | 序列号过滤 | 作业给了 `serials` 时，只保留这些序列号的 PDF（数据目录里有别的序列号就复制到临时目录），并把机种块顺序按给定序列号排列 |
 | 写出与归档 | 调 `main_func` 后取 `save_file_name`，按 `out_dir` / `out_name` 归档；目标已有同名文件时先改名为 `*.bak-<时间戳>.xlsx` 再覆盖 |
 | 压缩与嵌入 | `zip` 时同步调 `ZipThread(...).zip_folder()`；`embed` 时调 `add_zip_to_excel(..., close_workbook=True, visible=False)`（需本机 Excel，嵌入后立即关闭本次打开的工作簿、不单独保留压缩包） |
-| 补数据 | 数据目录里只有 docx 没有 PDF 时，用 `docx2pdf.convert_docx_files()` 单线程转换（只转作业关心的序列号，且不关掉用户已打开的 Word 文档） |
-| 借用别的周期数据 | 作业给了 `replace_map` 时，先用 `gui.ui_wordreplace.replace_text_in_docx()` 把源目录 docx 改名/改写内容到临时目录（源目录只读），按目标序列号过滤后再转 PDF、出报告 |
+| 补数据 | 数据目录里只有 docx 没有 PDF 时，用 `docx2pdf.convert_docx_files()` 单线程转换（只转作业关心的序列号；失败重试 3 次并重连 Word；不关掉用户已打开的 Word 文档） |
+| 借用别的周期数据 | 作业给了 `replace_map` 时，先用 `gui.ui_wordreplace.replace_text_in_docx()` 把源目录 docx 改名/改写内容到临时目录（源目录只读），按目标序列号过滤后再转 PDF、出报告；替换表会自动补「序列号+尾字母」变体、按长串优先替换，输出文件名过滤 Windows 非法字符 |
 | 退出 | 输出落盘后 `os._exit(code)`：离屏 Qt 对象在解释器析构阶段会触发堆损坏（`0xC0000374`） |
 
 ## 4. 运行、调试与打包

@@ -234,6 +234,13 @@ def ensure_pdfs(data_dir: str, serials: Sequence[str]) -> int:
     return converted
 
 
+def safe_filename(name: str) -> str:
+    """去掉 Windows 文件名非法字符（序列号里可能出现 ``*`` 之类的标记）。"""
+    for ch in '\\/:*?"<>|':
+        name = name.replace(ch, "")
+    return name
+
+
 def prepare_replaced_data(job: dict[str, Any]) -> tuple[str, str]:
     """按 ``replace_map`` 用 Word 替换工具改写 docx，输出到临时目录。
 
@@ -249,6 +256,16 @@ def prepare_replaced_data(job: dict[str, Any]) -> tuple[str, str]:
     ]
     if not pairs:
         raise RuntimeError("replace_map 为空")
+    # 部分源文档里序列号后面跟了一个字母（实测 FSM038-GQ1G 的 docx 里是 "…LJb"），
+    # 只替换序列号会把这个尾字母留在结果里，因此顺带把「序列号+字母」的变体一并替换
+    extra = []
+    for old, new in pairs:
+        for suffix in ("b", "B"):
+            if (old + suffix, new) not in pairs and (old + suffix, new) not in extra:
+                extra.append((old + suffix, new))
+    pairs = pairs + extra
+    # 先替换较长的源字符串（否则 "…LJ" 先被换掉后，"…LJb" 就再也匹配不上了）
+    pairs.sort(key=lambda pair: len(pair[0]), reverse=True)
     olds = [old for old, _ in pairs]
     news = [new for _, new in pairs]
 
@@ -271,9 +288,17 @@ def prepare_replaced_data(job: dict[str, Any]) -> tuple[str, str]:
         new_name = name
         for old, new in pairs:
             new_name = new_name.replace(old, new)
-        replace_text_in_docx(
-            os.path.join(src, name), os.path.join(work_dir, new_name), olds, news
-        )
+        try:
+            replace_text_in_docx(
+                os.path.join(src, name),
+                os.path.join(work_dir, safe_filename(new_name)),
+                olds,
+                news,
+            )
+        except Exception:
+            # 失败时不要留下半个临时目录（prepare_workspace 的清理逻辑还没接管）
+            shutil.rmtree(temp_root, ignore_errors=True)
+            raise
 
     # 源目录可能还含别的序列号（替换后仍是原样），只保留目标序列号，避免机种数超限
     keep = {str(s).strip() for s in (job.get("serials") or []) if str(s).strip()}

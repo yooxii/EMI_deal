@@ -30,11 +30,15 @@ def _attach_word():
         return word, True
 
 
-def convert_docx_files(docx_paths) -> tuple[int, int]:
+def convert_docx_files(docx_paths, retries: int = 3) -> tuple[int, int]:
     """把指定的 docx 逐个另存为同名 pdf，返回 ``(成功数, 失败数)``。
 
-    单份失败只记日志并继续；全部结束后仅在本进程启动过 Word 时退出 Word。
+    单份失败时重新连接 Word 再试（最多 ``retries`` 次）——Word COM 在连续转换
+    上百份文件时会偶发 ``RPC 服务器不可用``／``<unknown>.Open``，重连后通常即可恢复；
+    全部结束后仅在本进程启动过 Word 时退出 Word。
     """
+    import time
+
     docx_paths = [os.path.abspath(path) for path in docx_paths]
     if not docx_paths:
         return 0, 0
@@ -49,17 +53,42 @@ def convert_docx_files(docx_paths) -> tuple[int, int]:
     failed = 0
     for docx_file in docx_paths:
         pdf_file = os.path.splitext(docx_file)[0] + ".pdf"
-        try:
-            doc = word.Documents.Open(docx_file)
-            doc.SaveAs(pdf_file, FileFormat=PDF_FILE_FORMAT)
-            doc.Close(SaveChanges=0)  # 不保存退出
-            converted += 1
-        except Exception as exc:
-            failed += 1
-            logger.exception("转换失败 %s: %s", docx_file, exc)
+        for attempt in range(1, retries + 1):
+            try:
+                doc = word.Documents.Open(docx_file)
+                doc.SaveAs(pdf_file, FileFormat=PDF_FILE_FORMAT)
+                doc.Close(SaveChanges=0)  # 不保存退出
+                if os.path.exists(pdf_file):
+                    converted += 1
+                else:
+                    raise RuntimeError("PDF 未生成")
+                break
+            except Exception as exc:
+                if attempt >= retries:
+                    failed += 1
+                    logger.exception(
+                        "转换失败（已重试 %d 次）%s: %s", retries, docx_file, exc
+                    )
+                    break
+                logger.warning(
+                    "转换失败，重连 Word 后重试(%d/%d) %s: %s",
+                    attempt,
+                    retries,
+                    os.path.basename(docx_file),
+                    exc,
+                )
+                time.sleep(2)
+                try:
+                    word, started = _attach_word()
+                    started_here = started_here or started
+                except Exception:  # noqa: BLE001 - 重连失败也继续重试
+                    logger.exception("重新连接 Word 失败")
 
     if started_here:
-        word.Quit()
+        try:
+            word.Quit()
+        except Exception:  # noqa: BLE001 - Word 可能已自行退出
+            logger.warning("退出 Word 失败（可能已自行退出）")
     return converted, failed
 
 
