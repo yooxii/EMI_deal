@@ -1,200 +1,388 @@
-# _*_ coding: UTF-8 _*_
+"""EMI 报告自动化主程序。
 
+把 EMI PDF 报告解析成测量数据，按模板写入 Excel，并按需生成 / 嵌入原始 PDF 压缩包。
+"""
+
+from __future__ import annotations
+
+import logging
 import os
 import re
 import sys
+import time
 import zipfile
 from io import BytesIO
-from PIL import Image as PImage
-import openpyxl as xl
-from openpyxl.drawing import image
-import win32com.client as win32
-import pdfplumber
-import logging
+from typing import Any, Callable, NamedTuple, Sequence
 
-from gui.ui_docx2pdf import Docx2PdfWindow
-from gui.ui_wordreplace import WordReplace
-from gui.mainWin import MainWindow
+import openpyxl as xl
+import pdfplumber
+import win32com.client as win32
+from openpyxl.drawing import image
+from PIL import Image as PImage
+from PySide6 import __version__ as pyside_version
+from PySide6.QtCore import QDate, QSize, QStandardPaths, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
-    QWidget,
-    QProgressBar,
-    QMessageBox,
     QCheckBox,
-    QPushButton,
     QDialog,
     QFileDialog,
-    QVBoxLayout,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
     QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
-from PySide6.QtGui import QIcon
-from PySide6.QtCore import Qt, QThread, Signal, QSize, QStandardPaths
 
-# 日志配置
-from logger import setup_logging, get_error_logger, safe_execute, log_checkpoint
+from gui.app_state import (
+    KEY_IMAGE_PATH,
+    KEY_LOAD_QTY,
+    KEY_MODEL_PATH,
+    KEY_REV,
+    KEY_SETTINGS,
+    KEY_TEMPLATE_PATH,
+    KEY_TEST_DATE,
+    KEY_TEST_DETAIL,
+    KEY_WEEK,
+    KEY_WORKNO,
+    AppState,
+)
+from gui.mainWin import MainWindow
+from gui.ui_docx2pdf import Docx2PdfWindow
+from gui.ui_wordreplace import WordReplace
+from logger import get_error_logger, log_checkpoint, setup_logging
+from naming import collect_name_tokens
 
-logName = "EMIRper.log"
-setup_logging(log_dir=".", log_filename=logName)
+# --------------------------------------------------------------------------- #
+# 常量与配置
+# --------------------------------------------------------------------------- #
+
+LOG_FILENAME = "EMIRper.log"
+STATE_SAVE_DELAY_MS = 300  # 输入变化后延迟落盘的防抖时间
+SERIAL_REFRESH_DELAY_MS = 500  # 数据路径变化后延迟刷新序列号的防抖时间
+REPORT_FILE_SUFFIX = ".pdf"  # 提取序列号时依据的报告文件后缀
+TEMPLATE_DIR = "template"
+TEMPLATE_NAME_PATTERN = r"_\d\.xlsx"  # 模板名中的 "_3.xlsx" / "_4.xlsx"
+DEFAULT_LOAD_QTY = 3
+SUPPORTED_LOAD_QTY = (3, 4)
+MAX_UUT_COUNT = 5  # 模板支持的最大机种（负载类型）数量
+ROWS_PER_UUT_UNIT = 4  # 每个机种每档负载占用 4 行
+ROWS_PER_LOAD_STEP = 2  # 同一机种内每档负载间隔 2 行
+REPORT_TAIL_ROWS = 4  # 报告表格尾部的行数（计算数据结束行时扣除）
+EMPTY_MARK = "-"  # 数据行中固定填 "-" 的列
+LINE_LABELS = {"L1": "Line", "N": "Neutral"}
+
+# PDF 文本解析位置（行、列均从 0 起算）
+PDF_HEADER_LINE_LIMIT = 20  # Serial / Power / Load 出现在前若干行内
+PDF_DATA_START_LINE = 15  # 测量数据表起始行
+PDF_DATA_MIN_COLUMNS = 10  # 视为数据行所需的最小列数
+PDF_PK_COLUMN = 4  # PK 值所在列
+PDF_AVG_COLUMN = 7  # AVG 值所在列
+PDF_LINE_COLUMN = 9  # L1 / N 标识所在列
+
+# 报告模板中的锚点
+SETUP_SHEET_NAME = "Setup"
+REPORT_SHEET_NAME = "Conducted EMI"
+SETUP_ANCHOR_COLUMN = 2  # Setup 表的 B 列存放锚点数值
+SETUP_ANCHOR_ROWS = {  # 属性名 -> Setup 表行号
+    "row_sn_": 1,
+    "col_sn_": 2,
+    "col_vol_": 3,
+    "col_line_": 4,
+    "col_load_": 5,
+    "row_end_": 7,
+    "col_end_": 8,
+}
+DEFAULT_ANCHORS = {  # 未读到模板时使用的兜底锚点
+    "row_sn_": 44,
+    "col_sn_": 4,
+    "col_vol_": 11,
+    "col_line_": 13,
+    "col_load_": 14,
+    "row_end_": 103,
+    "col_end_": 27,
+}
+HEADER_CELL_MODEL = "F5"  # 单体型号
+HEADER_CELL_DATE = "F6"  # 测试日期
+HEADER_CELL_DETAIL = "F8"  # 测试细节
+HEADER_CELL_WORKNO = "F44"  # 工令
+HEADER_CELL_REV = "H44"  # 版本
+HEADER_CELL_WEEK = "I44"  # 周期 / D/C
+IMAGE_ANCHOR_CELL = "C27"  # 测试图片插入位置
+IMAGE_HEIGHT_PIXELS = 250  # 图片按高度等比缩放
+IMAGE_JPEG_QUALITY = 100
+# 数据列偏移 -> PDF 数据行的字段下标（None 表示固定写 EMPTY_MARK）
+MEASUREMENT_CELL_SOURCES: tuple[tuple[int, int | None], ...] = (
+    (1, 0),
+    (2, 1),
+    (3, 3),
+    (4, 6),
+    (5, None),
+    (6, 2),
+    (7, 5),
+)
+
+
+class SettingItem(NamedTuple):
+    """一条布尔型设置项的定义。"""
+
+    key: str
+    label: str
+    tooltip: str
+    default: bool
+
+
+SETTING_ITEMS = (
+    SettingItem(
+        "NeedZip", "生成压缩包:", "是否生成压缩包，压缩包中包含原始PDF文件。", True
+    ),
+    SettingItem("AddZip", "嵌入压缩包:", "是否嵌入压缩包到excel文件。", True),
+    SettingItem(
+        "CloseExcel",
+        "执行完毕关闭Excel程序:",
+        "是否在处理完毕后关闭excel程序，默认保留。",
+        False,
+    ),
+)
+
+# --------------------------------------------------------------------------- #
+# 日志
+# --------------------------------------------------------------------------- #
+
+setup_logging(log_dir=".", log_filename=LOG_FILENAME)
 logger = logging.getLogger(__name__)
-
-# Initialize error logger
 error_logger = get_error_logger()
 
 
-class ProcessPdfThread(QThread):
-    progress_updated = Signal(int)  # 发送进度更新信号
-    processing_finished = Signal(dict)  # 发送处理完成信号
-    processing_error = Signal(str)  # 发送错误信息信号
+# --------------------------------------------------------------------------- #
+# 工作线程
+# --------------------------------------------------------------------------- #
 
-    def __init__(self, directory):
+
+class ProcessPdfThread(QThread):
+    """遍历目录中的 PDF 报告并解析出测量数据。"""
+
+    progress_updated = Signal(int)  # 已处理文件数
+    processing_finished = Signal(dict)  # {文件名: 解析结果}
+    processing_error = Signal(str)  # 整体失败信息
+
+    def __init__(self, directory: str) -> None:
         super().__init__()
         self.directory = directory
 
-    def run(self):
+    def run(self) -> None:
         try:
-            result = self.dealDirs(self.directory)
-            self.processing_finished.emit(result)
-        except Exception as e:
-            self.processing_error.emit(str(e))
+            result = self.deal_dirs(self.directory)
+        except Exception as exc:
+            logger.exception("解析 PDF 目录失败: %s", exc)
+            self.processing_error.emit(str(exc))
             return
-        logger.info(f"Pdf Processing completed!")
+        logger.info("PDF 解析线程结束")
+        self.processing_finished.emit(result)
 
-    def openPdf(self, path_pdf):
-        # 读取pdf文件，提取数据
+    def open_pdf(self, path_pdf: str) -> dict[str, Any]:
+        """读取 PDF 前两页文本并解析成该报告的测量数据。"""
         with pdfplumber.open(path_pdf) as pdf:
-            text = pdf.pages[0].extract_text() + "\n" + pdf.pages[1].extract_text()
-            datas = [item for item in text.split("\n") if item]
-            return self.dealDatas(datas)
+            pages = pdf.pages[:2]
+            # 部分报告只有一页，取前两页并容忍空文本
+            text = "\n".join(page.extract_text() or "" for page in pages)
+            logger.debug(
+                "%s: 共 %d 页，读取前 %d 页，提取文本 %d 字符",
+                os.path.basename(path_pdf),
+                len(pdf.pages),
+                len(pages),
+                len(text),
+            )
+        return self.deal_datas([line for line in text.split("\n") if line])
 
-    def dealDatas(self, datas):
-        res = {}
-        for data in datas[:20]:
-            tmp = data.split(" ")
-            if tmp[0] == "Serial":
-                res["Serial"] = tmp[-1]
-            elif tmp[0] == "Power":
-                res["Power"] = tmp[-1]
-            elif tmp[0] == "Load":
-                res["Load"] = tmp[-1]
-        resdatas = []
-        for it in datas[15:]:
-            data = it.split(" ")
-            if len(data) > 10:
-                resdatas.append(data)
-        for i in range(len(resdatas)):
-            resdatas[i][0] = str(i + 1)
-        res["datas"] = resdatas
-        res_avg = sorted(res["datas"], key=lambda x: float(x[7]), reverse=False)
-        # 对pk列升序排列
-        res_pk = sorted(res["datas"], key=lambda x: float(x[4]), reverse=False)
-        # 取avg和pk中最小的
-        res["datas"] = (
-            res_avg if float(res_avg[0][7]) <= float(res_pk[0][4]) else res_pk
+    def deal_datas(self, lines: Sequence[str]) -> dict[str, Any]:
+        """从 PDF 文本行中提取序号/电压/负载与测量数据行。"""
+        result: dict[str, Any] = {}
+        for line in lines[:PDF_HEADER_LINE_LIMIT]:
+            parts = line.split(" ")
+            if parts[0] == "Serial":
+                result["Serial"] = parts[-1]
+            elif parts[0] == "Power":
+                result["Power"] = parts[-1]
+            elif parts[0] == "Load":
+                result["Load"] = parts[-1]
+
+        missing = [key for key in ("Serial", "Power", "Load") if key not in result]
+        if missing:
+            logger.warning("PDF 头部字段缺失，可能不是标准报告: %s", ", ".join(missing))
+
+        rows: list[list[str]] = []
+        for line in lines[PDF_DATA_START_LINE:]:
+            columns = line.split(" ")
+            if len(columns) > PDF_DATA_MIN_COLUMNS:
+                rows.append(columns)
+        if not rows:
+            raise ValueError("未从 PDF 中解析到测量数据行")
+        for index, row in enumerate(rows, start=1):
+            row[0] = str(index)  # 第 1 列重编号为行号
+
+        # 分别按 AVG、PK 升序排序，取两者最小值更小的那份作为报告数据
+        rows_by_avg = sorted(rows, key=lambda row: float(row[PDF_AVG_COLUMN]))
+        rows_by_pk = sorted(rows, key=lambda row: float(row[PDF_PK_COLUMN]))
+        use_avg = float(rows_by_avg[0][PDF_AVG_COLUMN]) <= float(
+            rows_by_pk[0][PDF_PK_COLUMN]
         )
-        return res
+        result["datas"] = rows_by_avg if use_avg else rows_by_pk
+        logger.debug(
+            "解析到 %d 行数据: Serial=%s, Power=%s, Load=%s, 取 %s 排序的首行",
+            len(rows),
+            result.get("Serial"),
+            result.get("Power"),
+            result.get("Load"),
+            "AVG" if use_avg else "PK",
+        )
+        return result
 
-    def dealDirs(self, modeldir):
-        res = {}
-        source_files = [f for f in os.listdir(modeldir) if f.endswith(".pdf")]
+    def deal_dirs(self, modeldir: str) -> dict[str, dict[str, Any]]:
+        """解析目录内所有 PDF；单个文件失败只记日志并继续。"""
+        results: dict[str, dict[str, Any]] = {}
+        source_files = [name for name in os.listdir(modeldir) if name.endswith(".pdf")]
+        logger.info("开始解析目录 %s，共 %d 个 PDF 文件", modeldir, len(source_files))
+        if not source_files:
+            logger.warning("目录内没有 PDF 文件: %s", modeldir)
 
-        for i, source_file in enumerate(source_files):
-            logger.info(f"Deal pdf fileName: {source_file}")
+        for index, source_file in enumerate(source_files):
+            logger.info("解析 PDF: %s", source_file)
             try:
-                res[source_file] = self.openPdf(os.path.join(modeldir, source_file))
-                # 发送进度更新信号
-                self.progress_updated.emit(i + 1)
-            except Exception as e:
-                logger.error(f"Error pdf processing {source_file}: {e}")
+                results[source_file] = self.open_pdf(
+                    os.path.join(modeldir, source_file)
+                )
+            except Exception as exc:
+                logger.exception("解析 PDF 失败 %s: %s", source_file, exc)
                 continue
-        return res
+            self.progress_updated.emit(index + 1)
+
+        logger.info(
+            "目录解析完成: 成功 %d / 共 %d（失败 %d）",
+            len(results),
+            len(source_files),
+            len(source_files) - len(results),
+        )
+        return results
 
 
 class ZipThread(QThread):
-    progress_updated = Signal(int)  # 发送进度更新信号
-    zip_finished = Signal(str)  # 压缩完成信号
-    zip_error = Signal(str)  # 压缩错误信号
+    """把目录下所有 PDF 打包成 zip（LZMA 压缩）。"""
 
-    def __init__(self, directory, zipname):
+    progress_updated = Signal(int)  # 已压缩文件数
+    zip_finished = Signal(str)  # 压缩包名（不含扩展名）
+    zip_error = Signal(str)  # 压缩失败信息
+
+    def __init__(self, directory: str, zipname: str) -> None:
         super().__init__()
         self.directory = directory
         self.zipname = zipname
 
-    def run(self):
-        self.zip_folder()
-
-    def zip_folder(self):
+    def run(self) -> None:
         try:
-            file_count = 0
-            pdf_files = []
+            self.zip_folder()
+        except Exception as exc:
+            logger.exception("压缩失败: %s", exc)
+            self.zip_error.emit(str(exc))
 
-            # 先统计需要压缩的PDF文件
-            for rootPath, _, files in os.walk(self.directory):
-                for file in files:
-                    if file.endswith(".pdf"):
-                        file_count += 1
-                        pdf_files.append((rootPath, file))
+    def zip_folder(self) -> None:
+        pdf_files: list[tuple] = []
+        for root_path, _dirs, files in os.walk(self.directory):
+            pdf_files.extend(
+                (root_path, name) for name in files if name.endswith(".pdf")
+            )
 
-            # 执行压缩操作
-            logger.info(f"Zipping {file_count} files...")
-            with zipfile.ZipFile(
-                f"{self.zipname}.zip", "w", zipfile.ZIP_LZMA
-            ) as harZip:
-                for i, (rootPath, file) in enumerate(pdf_files):
-                    if not file.endswith(".pdf"):
-                        continue
-                    file_path = os.path.join(rootPath, file)
-                    arcname = os.path.relpath(file_path, self.directory)
-                    harZip.write(file_path, arcname=arcname)
+        logger.info("开始压缩 %d 个文件...", len(pdf_files))
+        if not pdf_files:
+            logger.warning("目录内没有可压缩的 PDF 文件: %s", self.directory)
 
-                    # 发送进度更新信号
-                    self.progress_updated.emit(i + 1)
+        zip_path = os.path.abspath(f"{self.zipname}.zip")
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_LZMA) as archive:
+            for index, (root_path, name) in enumerate(pdf_files, start=1):
+                file_path = os.path.join(root_path, name)
+                archive.write(
+                    file_path, arcname=os.path.relpath(file_path, self.directory)
+                )
+                self.progress_updated.emit(index)
 
-            # 压缩完成，发送完成信号
-            self.zip_finished.emit(self.zipname)
-        except Exception as e:
-            self.zip_error.emit(str(e))
+        logger.info(
+            "压缩完成: %s (%.2f MB)",
+            zip_path,
+            os.path.getsize(zip_path) / (1024 * 1024),
+        )
+        self.zip_finished.emit(self.zipname)
+
+
+# --------------------------------------------------------------------------- #
+# 主窗口
+# --------------------------------------------------------------------------- #
 
 
 class EMIWindow(MainWindow):
-    def __init__(self, parent=None):
+    """主窗口：协调 PDF 解析、Excel 写入、压缩与嵌入。"""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__()
 
         self.init_var()
+        self.load_state()  # 先恢复上次输入（此时尚未连接信号，不会触发回写）
         self.init_connect()
-        logger.info("main window inited.")
+        self.bind_state_tracking()
+        self.bind_serial_tracking()
+        self.refresh_serial_numbers()  # 按已恢复的数据路径显示一次序列号
+        self.install_exception_hook()
+        logger.info("主窗口初始化完成，状态文件: %s", self.app_state.path)
 
-    def init_var(self):
+    # ---- 初始化 ---------------------------------------------------------- #
+
+    def init_var(self) -> None:
         self.getpdf_running = False
-        self.row_sn_ = 44  # 序列号所在行
-        self.col_sn_ = 4  # 序列号所在列
-        self.col_vol_ = 11  # 电压所在列
-        self.col_line_ = 13  # 线性所在列
-        self.col_load_ = 14  # 负荷所在列
-        self.row_end_ = 103  # 结束行
-        self.col_end_ = 27  # 结束列
-        self.rootpath = None  # 根目录
 
-        self.settings_value = {
-            "NeedZip": True,  # 是否需要压缩
-            "AddZip": True,  # 是否嵌入压缩包到excel文件
-            "CloseExcel": False,  # 是否在处理完毕后关闭excel程序
-        }
-        self.settings = {}  # 设置
-        self.windows: list[QWidget] = []  # 打开的窗口
-        self.log_path = os.path.join(os.getcwd(), logName)  # 日志文件路径
-        self.save_file_name = None
+        # Excel 锚点：先给默认值，成功打开模板后由 Setup 表覆盖
+        self.row_sn_ = DEFAULT_ANCHORS["row_sn_"]  # 序列号起始行
+        self.col_sn_ = DEFAULT_ANCHORS["col_sn_"]  # 序列号列
+        self.col_vol_ = DEFAULT_ANCHORS["col_vol_"]  # 输入电压列
+        self.col_line_ = DEFAULT_ANCHORS["col_line_"]  # 线性（L1/N）列
+        self.col_load_ = DEFAULT_ANCHORS["col_load_"]  # 负载列
+        self.row_end_ = DEFAULT_ANCHORS["row_end_"]  # 数据结束行
+        self.col_end_ = DEFAULT_ANCHORS["col_end_"]  # 数据结束列
 
-        self.res = None
+        self.rootpath: str | None = None  # 上次使用的目录
+        self.file_count = 0
+        self.settings_value = {item.key: item.default for item in SETTING_ITEMS}
+        self.settings: dict[str, QCheckBox] = {}  # 设置窗口中的勾选框
+        self.windows: list[QWidget] = []  # 已打开的窗口，退出时统一关闭
+        self.log_path: str | None = os.path.join(os.getcwd(), LOG_FILENAME)
+        self.save_file_name: str | None = None
+        self.report_data: dict[str, dict[str, Any]] = {}
+        self.Text_log: QTextEdit | None = None
+        self.progressBar: QProgressBar | None = None
+        self.zip_progressBar: QProgressBar | None = None
 
-    def init_connect(self):
+        # 界面状态持久化：异常退出后重新打开可自动恢复输入内容
+        self.app_state = AppState()
+        self.state_timer = QTimer(self)
+        self.state_timer.setSingleShot(True)
+        self.state_timer.setInterval(STATE_SAVE_DELAY_MS)
+        self.state_timer.timeout.connect(self.save_state)
+
+        # 数据路径变化后自动刷新序列号显示
+        self.serial_timer = QTimer(self)
+        self.serial_timer.setSingleShot(True)
+        self.serial_timer.setInterval(SERIAL_REFRESH_DELAY_MS)
+        self.serial_timer.timeout.connect(self.refresh_serial_numbers)
+
+    def init_connect(self) -> None:
         self.btn_exit.clicked.connect(self.close)
         self.btn_start.clicked.connect(self.getpdfdatas)
         self.btnfile_template.clicked.connect(self.select_templatepath)
         self.btnfile_model.clicked.connect(self.select_modelpath)
         self.btnfile_img.clicked.connect(self.select_imgpath)
         self.btn_getdetail.clicked.connect(self.get_testdetail)
+        self.label_serial.clicked.connect(self.refresh_serial_numbers)
         self.action_exit.triggered.connect(self.close)
         self.action_sets.triggered.connect(self.show_setting)
         self.action_about.triggered.connect(self.show_about)
@@ -203,71 +391,175 @@ class EMIWindow(MainWindow):
         self.action_topdf.triggered.connect(self.show_docx2pdf)
         self.action_wordreplace.triggered.connect(self.show_wordreplace)
 
-    def select_modelpath(self):
+    # ---- 界面状态持久化 -------------------------------------------------- #
+
+    def load_state(self) -> None:
+        """恢复上次的输入内容与设置开关（不存在或损坏时退回默认值）。"""
+        state = self.app_state
+
+        self.lineEdit_template.setText(str(state.get(KEY_TEMPLATE_PATH, "")))
+        self.lineEdit_model.setText(str(state.get(KEY_MODEL_PATH, "")))
+        self.lineEdit_week.setText(str(state.get(KEY_WEEK, "")))
+        self.lineEdit_rev.setText(str(state.get(KEY_REV, "")))
+        self.lineEdit_workerno.setText(str(state.get(KEY_WORKNO, "")))
+        self.lineEdit_img.setText(str(state.get(KEY_IMAGE_PATH, "")))
+        self.text_detail.setPlainText(str(state.get(KEY_TEST_DETAIL, "")))
+
+        self.spin_qty.setValue(self._as_int(state.get(KEY_LOAD_QTY), DEFAULT_LOAD_QTY))
+
+        saved_date = QDate.fromString(str(state.get(KEY_TEST_DATE, "")), Qt.ISODate)
+        if saved_date.isValid():
+            self.date_test.setDate(saved_date)
+
+        saved_settings = state.get(KEY_SETTINGS, {})
+        if isinstance(saved_settings, dict):
+            for item in SETTING_ITEMS:
+                self.settings_value[item.key] = bool(
+                    saved_settings.get(item.key, item.default)
+                )
+
+        logger.info("界面状态已恢复: %s", self.app_state.path)
+
+    @staticmethod
+    def _as_int(value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def save_state(self) -> None:
+        """把当前输入内容与设置开关写入状态文件（原子写，异常退出也不会丢）。"""
+        self.app_state.update(
+            {
+                KEY_TEMPLATE_PATH: self.lineEdit_template.text(),
+                KEY_MODEL_PATH: self.lineEdit_model.text(),
+                KEY_LOAD_QTY: self.spin_qty.value(),
+                KEY_WEEK: self.lineEdit_week.text(),
+                KEY_REV: self.lineEdit_rev.text(),
+                KEY_WORKNO: self.lineEdit_workerno.text(),
+                KEY_IMAGE_PATH: self.lineEdit_img.text(),
+                KEY_TEST_DETAIL: self.text_detail.toPlainText(),
+                KEY_TEST_DATE: self.date_test.date().toString(Qt.ISODate),
+                KEY_SETTINGS: dict(self.settings_value),
+            }
+        )
+
+    def _schedule_state_save(self, *_args: Any) -> None:
+        """输入变化后延迟落盘，避免每个字符都写一次磁盘。"""
+        self.state_timer.start()
+
+    def bind_state_tracking(self) -> None:
+        """所有输入控件的变化都触发一次延迟保存。"""
+        for line_edit in (
+            self.lineEdit_template,
+            self.lineEdit_model,
+            self.lineEdit_week,
+            self.lineEdit_rev,
+            self.lineEdit_workerno,
+            self.lineEdit_img,
+        ):
+            line_edit.textChanged.connect(self._schedule_state_save)
+        self.text_detail.textChanged.connect(self._schedule_state_save)
+        self.spin_qty.valueChanged.connect(self._schedule_state_save)
+        self.date_test.dateChanged.connect(self._schedule_state_save)
+
+    # ---- 序列号 ---------------------------------------------------------- #
+
+    def bind_serial_tracking(self) -> None:
+        """数据路径变化后延迟刷新序列号显示。"""
+        self.lineEdit_model.textChanged.connect(self._schedule_serial_refresh)
+
+    def _schedule_serial_refresh(self, *_args: Any) -> None:
+        self.serial_timer.start()
+
+    def refresh_serial_numbers(self, *_args: Any) -> None:
+        """从数据路径下的报告文件名中提取序列号并显示（「-」前第一段，去重）。"""
+        directory = self.lineEdit_model.text().strip()
+        serials = collect_name_tokens(directory, REPORT_FILE_SUFFIX)
+        self.text_serial.setPlainText("\n".join(serials))
+        if serials:
+            logger.info("序列号刷新: %d 个（%s）", len(serials), directory)
+        else:
+            logger.debug("序列号刷新: 未提取到序列号（%s）", directory)
+
+    def install_exception_hook(self) -> None:
+        """未捕获异常时先落盘再走默认处理，保证异常退出也不丢输入。"""
+        sys.excepthook = self._on_uncaught_exception
+
+    def _on_uncaught_exception(
+        self, exc_type: type, exc_value: BaseException, exc_tb: Any
+    ) -> None:
+        error_logger.log_error(
+            "未捕获异常", exc_info=exc_value, context="uncaught exception"
+        )
+        try:
+            self.save_state()
+        except Exception:
+            logger.exception("异常退出时保存界面状态失败")
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    # ---- 路径选择 -------------------------------------------------------- #
+
+    def _start_directory(self) -> str:
+        """文件对话框的默认目录。"""
+        if self.rootpath and os.path.exists(self.rootpath):
+            return self.rootpath
+        return QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DocumentsLocation
+        )
+
+    def select_modelpath(self) -> None:
+        """选择存放 EMI PDF 报告的机种目录。"""
         log_checkpoint("Before opening directory dialog", "select_modelpath")
         try:
             path = QFileDialog.getExistingDirectory(
-                self,
-                self.tr("选择测试数据所在目录"),
-                dir=(
-                    self.rootpath
-                    if self.rootpath and os.path.exists(self.rootpath)
-                    else QStandardPaths.writableLocation(
-                        QStandardPaths.StandardLocation.DocumentsLocation
-                    )
-                ),
+                self, self.tr("选择测试数据所在目录"), dir=self._start_directory()
             )
             log_checkpoint("After directory dialog closed", "select_modelpath")
-
             if path:
                 self.rootpath = os.path.split(path)[0]
                 self.lineEdit_model.setText(path)
-                logger.info(f"Selected model path: {path}")
-        except Exception as e:
+                logger.info("已选择数据目录: %s", path)
+        except Exception as exc:
             error_logger.log_error(
-                "Failed to select model path", exc_info=e, context="select_modelpath"
+                "Failed to select model path", exc_info=exc, context="select_modelpath"
             )
             QMessageBox.critical(
-                self, "错误", f"选择目录失败: {str(e)}\n详细信息已记录到 error.log"
+                self, "错误", f"选择目录失败: {exc}\n详细信息已记录到 error.log"
             )
 
-    def select_templatepath(self):
+    def select_templatepath(self) -> str | None:
+        """选择 Excel 模板，返回所选路径（取消时返回 None）。"""
         log_checkpoint("Before opening file dialog", "select_templatepath")
         try:
-            path = QFileDialog.getOpenFileName(
+            path, _ = QFileDialog.getOpenFileName(
                 self,
                 "选择模板",
                 filter="Excel文件 (*.xlsx)",
-                dir=(
-                    self.rootpath
-                    if self.rootpath and os.path.exists(self.rootpath)
-                    else QStandardPaths.writableLocation(
-                        QStandardPaths.StandardLocation.DocumentsLocation
-                    )
-                ),
+                dir=self._start_directory(),
             )
             log_checkpoint("After file dialog closed", "select_templatepath")
-
-            if path and path[0]:
-                self.rootpath = os.path.split(os.path.dirname(path[0]))[0]
-                self.lineEdit_template.setText(path[0])
-                logger.info(f"Selected template path: {path[0]}")
-                return path[0]
-        except Exception as e:
+            if path:
+                self.rootpath = os.path.split(os.path.dirname(path))[0]
+                self.lineEdit_template.setText(path)
+                logger.info("已选择模板: %s", path)
+                return path
+        except Exception as exc:
             error_logger.log_error(
                 "Failed to select template path",
-                exc_info=e,
+                exc_info=exc,
                 context="select_templatepath",
             )
             QMessageBox.critical(
-                self, "错误", f"选择模板失败: {str(e)}\n详细信息已记录到 error.log"
+                self, "错误", f"选择模板失败: {exc}\n详细信息已记录到 error.log"
             )
-            return None
+        return None
 
-    def select_imgpath(self):
+    def select_imgpath(self) -> None:
+        """选择要插入报告的测试图片。"""
         log_checkpoint("Before opening image dialog", "select_imgpath")
         try:
-            path = QFileDialog.getOpenFileName(
+            path, _ = QFileDialog.getOpenFileName(
                 self,
                 "选择图片",
                 filter="Image Files (*.png *.jpg *.jpeg *.bmp)",
@@ -276,461 +568,548 @@ class EMIWindow(MainWindow):
                 ),
             )
             log_checkpoint("After image dialog closed", "select_imgpath")
-
-            if path and path[0]:
-                self.lineEdit_img.setText(path[0])
-                logger.info(f"Selected image path: {path[0]}")
-        except Exception as e:
+            if path:
+                self.lineEdit_img.setText(path)
+                logger.info("已选择测试图片: %s", path)
+        except Exception as exc:
             error_logger.log_error(
-                "Failed to select image path", exc_info=e, context="select_imgpath"
+                "Failed to select image path", exc_info=exc, context="select_imgpath"
             )
             QMessageBox.critical(
-                self, "错误", f"选择图片失败: {str(e)}\n详细信息已记录到 error.log"
+                self, "错误", f"选择图片失败: {exc}\n详细信息已记录到 error.log"
             )
 
-    def closeEvent(self, event):
-        # 关闭所有窗口
+    # ---- 窗口管理 -------------------------------------------------------- #
+
+    def closeEvent(self, event) -> None:
+        """退出时先落盘输入内容，再关闭所有由主窗口打开的窗口。"""
+        self.save_state()
+        logger.info("程序退出，界面状态已保存: %s", self.app_state.path)
         for window in self.windows:
             window.close()
-        return super().closeEvent(event)
+        super().closeEvent(event)
 
-    def update_Setting(self):
-        for key, _ in self.settings.items():
-            self.settings_value[key] = self.settings[key].isChecked()
-        logger.info(f"Setting updated: {self.settings_value}")
+    def _focus_or_create(
+        self, attr_name: str, factory: Callable[[], QWidget]
+    ) -> QWidget:
+        """已存在的窗口置前复用，否则创建并登记到关闭列表。"""
+        window = getattr(self, attr_name, None)
+        if window is None:
+            window = factory()
+            setattr(self, attr_name, window)
+            self.windows.append(window)
+            logger.debug("已创建窗口: %s", attr_name)
+        window.show()
+        window.activateWindow()
+        return window
 
-    def update_log(self):
-        if self.Text_log is None:
-            return
-        if self.log_path is None:
-            self.log_path = os.path.join(os.getcwd(), logName)
-        if not os.path.exists(self.log_path):
-            open(self.log_path, "w").close()
-        self.Text_log.setText(open(self.log_path, "r", encoding="utf-8").read())
-
-    def export_log(self):
-        export_path = QFileDialog.getSaveFileName(
-            self, "导出日志", filter="Log Files (*.log)"
+    def show_docx2pdf(self) -> None:
+        self._focus_or_create(
+            "docx2pdf_win", lambda: Docx2PdfWindow(rootpath=self.lineEdit_model.text())
         )
-        with open(self.log_path, "r") as sf:
-            with open(export_path, "w") as f:
-                f.write(sf.read())
 
-    def clear_log(self):
-        open(self.log_path, "w").close()
-        self.Text_log.clear()
-        logger.info("Log cleared.")
+    def show_wordreplace(self) -> None:
+        self._focus_or_create(
+            "wordreplace_win", lambda: WordReplace(rootpath=self.rootpath)
+        )
 
-    def show_docx2pdf(self):
-        if hasattr(self, "docx2pdf_win") and self.docx2pdf_win is not None:
-            self.docx2pdf_win.show()
-            self.docx2pdf_win.activateWindow()
-            return
-        self.docx2pdf_win = Docx2PdfWindow(rootpath=self.lineEdit_model.text())
-        self.windows.append(self.docx2pdf_win)
-        self.docx2pdf_win.show()
-        self.windows.append(self.docx2pdf_win)
+    def show_setting(self) -> None:
+        self._focus_or_create("setting_win", self._build_setting_window)
 
-    def show_wordreplace(self):
-        if hasattr(self, "wordreplace_win") and self.wordreplace_win is not None:
-            self.wordreplace_win.show()
-            self.wordreplace_win.activateWindow()
-            return
-        self.wordreplace_win = WordReplace(rootpath=self.rootpath)
-        self.windows.append(self.wordreplace_win)
-        self.wordreplace_win.show()
-        self.windows.append(self.wordreplace_win)
-
-    def show_setting(self):
-        if hasattr(self, "setting_win") and self.setting_win is not None:
-            self.setting_win.show()
-            self.setting_win.activateWindow()
-            return
-        self.setting_win = QWidget()
-        self.setting_win.setWindowTitle("设置")
-        icon = QIcon(":/emipdf/acbel -1.jpg")
-        self.setting_win.setWindowIcon(icon)
-        self.setting_win.resize(300, 300)
-        self.setting_win.setStyleSheet("QLabel { font-size: 15px; }")
+    def _build_setting_window(self) -> QWidget:
+        window = QWidget()
+        window.setWindowTitle("设置")
+        window.setWindowIcon(QIcon(":/emipdf/acbel -1.jpg"))
+        window.resize(300, 300)
+        window.setStyleSheet("QLabel { font-size: 15px; }")
 
         layout = QVBoxLayout()
+        self.settings.clear()
+        for item in SETTING_ITEMS:
+            row = QHBoxLayout()
+            label = QLabel(text=item.label, alignment=Qt.AlignRight | Qt.AlignVCenter)
+            label.setToolTip(item.tooltip)
+            row.addWidget(label)
 
-        layoutH_1 = QHBoxLayout()
-        label_NeedZip = QLabel(
-            text="生成压缩包:", alignment=Qt.AlignRight | Qt.AlignVCenter
-        )
-        label_NeedZip.setToolTip("是否生成压缩包，压缩包中包含原始PDF文件。")
-        layoutH_1.addWidget(label_NeedZip)
-        self.NeedZip_checkbox = QCheckBox()
-        self.NeedZip_checkbox.setChecked(self.settings_value["NeedZip"])
-        layoutH_1.addWidget(self.NeedZip_checkbox)
-        layout.addLayout(layoutH_1)
-        self.settings["NeedZip"] = self.NeedZip_checkbox
+            checkbox = QCheckBox()
+            checkbox.setChecked(self.settings_value[item.key])
+            row.addWidget(checkbox)
+            self.settings[item.key] = checkbox
 
-        layoutH_2 = QHBoxLayout()
-        label_addZip = QLabel(
-            text="嵌入压缩包:", alignment=Qt.AlignRight | Qt.AlignVCenter
-        )
-        label_addZip.setToolTip("是否嵌入压缩包到excel文件。")
-        layoutH_2.addWidget(label_addZip)
-        self.addZip_checkbox = QCheckBox()
-        self.addZip_checkbox.setChecked(self.settings_value["AddZip"])
-        layoutH_2.addWidget(self.addZip_checkbox)
-        layout.addLayout(layoutH_2)
-        self.settings["AddZip"] = self.addZip_checkbox
+            layout.addLayout(row)
 
-        layoutH_3 = QHBoxLayout()
-        label_closeExcel = QLabel(
-            text="执行完毕关闭Excel程序:", alignment=Qt.AlignRight | Qt.AlignVCenter
-        )
-        label_closeExcel.setToolTip("是否在处理完毕后关闭excel程序，默认保留。")
-        layoutH_3.addWidget(label_closeExcel)
-        self.closeExcel_checkbox = QCheckBox()
-        self.closeExcel_checkbox.setChecked(self.settings_value["CloseExcel"])
-        layoutH_3.addWidget(self.closeExcel_checkbox)
-        layout.addLayout(layoutH_3)
-        self.settings["CloseExcel"] = self.closeExcel_checkbox
+        buttons = QHBoxLayout()
+        save_button = QPushButton(text="保存")
+        save_button.clicked.connect(self.update_Setting)
+        save_button.clicked.connect(window.close)
+        buttons.addWidget(save_button)
 
-        layoutBTN = QHBoxLayout()
-        button_Save = QPushButton(text="保存")
-        button_Save.clicked.connect(self.update_Setting)
-        button_Save.clicked.connect(self.setting_win.close)
-        layoutBTN.addWidget(button_Save)
+        cancel_button = QPushButton(text="取消")
+        cancel_button.clicked.connect(window.close)
+        buttons.addWidget(cancel_button)
 
-        button_Cancel = QPushButton(text="取消")
-        button_Cancel.clicked.connect(self.setting_win.close)
-        layoutBTN.addWidget(button_Cancel)
+        layout.addLayout(buttons)
+        window.setLayout(layout)
+        return window
 
-        layout.addLayout(layoutBTN)
-        self.setting_win.setLayout(layout)
-        self.setting_win.show()
-        self.windows.append(self.setting_win)
+    def show_log(self) -> None:
+        self._focus_or_create("log_win", self._build_log_window)
+        self.update_log()
 
-    def show_log(self):
-        if hasattr(self, "log_win") and self.log_win is not None:
-            self.update_log()
-            self.log_win.show()
-            self.log_win.activateWindow()
-            return
-        self.log_win = QDialog()
-        self.log_win.setWindowTitle("日志")
+    def _build_log_window(self) -> QDialog:
+        window = QDialog()
+        window.setWindowTitle("日志")
         icon = QIcon()
         icon.addFile(":/emipdf/acbel -1.jpg", QSize(), QIcon.Normal, QIcon.Off)
-        self.log_win.setWindowIcon(icon)
-        self.log_win.resize(800, 600)
-        self.log_win.setStyleSheet("QLabel { font-size: 15px; }")
-        self.log_win.setLayout(QVBoxLayout())
+        window.setWindowIcon(icon)
+        window.resize(800, 600)
+        window.setStyleSheet("QLabel { font-size: 15px; }")
+        window.setLayout(QVBoxLayout())
 
         self.Text_log = QTextEdit(alignment=Qt.AlignLeft, readOnly=True)
         self.Text_log.setLineWrapMode(QTextEdit.WidgetWidth)
-        self.log_win.layout().addWidget(self.Text_log)
+        window.layout().addWidget(self.Text_log)
 
-        layout_btn = QHBoxLayout()
+        buttons = QHBoxLayout()
+        update_button = QPushButton(text="更 新 日 志")
+        update_button.clicked.connect(self.update_log)
+        buttons.addWidget(update_button)
 
-        btn_update = QPushButton(text="更 新 日 志")
-        btn_update.clicked.connect(self.update_log)
-        layout_btn.addWidget(btn_update)
+        clear_button = QPushButton(text="清 空 日 志")
+        clear_button.clicked.connect(self.clear_log)
+        buttons.addWidget(clear_button)
 
-        btn_clear = QPushButton(text="清 空 日 志")
-        btn_clear.clicked.connect(self.clear_log)
-        layout_btn.addWidget(btn_clear)
+        export_button = QPushButton(text="导 出 日 志")
+        export_button.clicked.connect(self.export_log)
+        buttons.addWidget(export_button)
 
-        btn_export = QPushButton(text="导 出 日 志")
-        btn_export.clicked.connect(self.export_log)
-        layout_btn.addWidget(btn_export)
+        window.layout().addLayout(buttons)
+        return window
 
-        self.log_win.layout().addLayout(layout_btn)
+    def show_about(self) -> None:
+        self._focus_or_create("about_win", self._build_about_window)
 
-        self.update_log()
-        self.log_win.show()
-        self.windows.append(self.log_win)
-
-    def show_about(self):
-        if hasattr(self, "about_win") and self.about_win is not None:
-            self.about_win.show()
-            self.about_win.activateWindow()
-            return
-        self.about_win = QWidget()
-        self.about_win.setWindowTitle("关于")
+    def _build_about_window(self) -> QWidget:
+        window = QWidget()
+        window.setWindowTitle("关于")
         icon = QIcon()
         icon.addFile(":/emipdf/acbel -1.jpg", QSize(), QIcon.Normal, QIcon.Off)
-        self.about_win.setWindowIcon(icon)
-        self.about_win.resize(300, 200)
-        self.about_win.setStyleSheet("QLabel { font-size: 15px; }")
-        self.about_win.setLayout(QVBoxLayout())
+        window.setWindowIcon(icon)
+        window.resize(300, 200)
+        window.setStyleSheet("QLabel { font-size: 15px; }")
+        window.setLayout(QVBoxLayout())
 
-        label_about = QLabel(
-            text="EMI-Report\n\n版本：1.2.0\n\n作者：Lucas Li\n\n邮箱：Lucas_Li@acbel.com",
+        label = QLabel(
+            text="EMI-Report\n\n版本：2.0\n\n作者：Lucas Li\n\n邮箱：Lucas_Li@acbel.com",
             alignment=Qt.AlignCenter,
         )
-        label_about.setWordWrap(True)
-        self.about_win.layout().addWidget(label_about)
+        label.setWordWrap(True)
+        window.layout().addWidget(label)
+        return window
 
-        self.about_win.show()
-        self.windows.append(self.about_win)
+    def show_helpdoc(self) -> None:
+        self._focus_or_create("helpdoc_win", self._build_helpdoc_window)
 
-    def show_helpdoc(self):
-        if hasattr(self, "helpdoc_win") and self.helpdoc_win is not None:
-            self.helpdoc_win.show()
-            self.helpdoc_win.activateWindow()
-            return
-        self.helpdoc_win = QWidget()
-        self.helpdoc_win.setWindowTitle("帮助文档")
+    def _build_helpdoc_window(self) -> QWidget:
+        window = QWidget()
+        window.setWindowTitle("帮助文档")
         icon = QIcon()
         icon.addFile(":/emipdf/acbel -1.jpg", QSize(), QIcon.Normal, QIcon.Off)
-        self.helpdoc_win.setWindowIcon(icon)
-        self.helpdoc_win.resize(800, 600)
-        self.helpdoc_win.setStyleSheet("QLabel { font-size: 15px; }")
-        self.helpdoc_win.setLayout(QVBoxLayout())
+        window.setWindowIcon(icon)
+        window.resize(800, 600)
+        window.setStyleSheet("QLabel { font-size: 15px; }")
+        window.setLayout(QVBoxLayout())
 
-        label_helpdoc = QLabel(
-            text="EMI-Report\n\n待补充...\n\n", alignment=Qt.AlignLeft
+        label = QLabel(text="EMI-Report\n\n待补充...\n\n", alignment=Qt.AlignLeft)
+        label.setWordWrap(True)
+        window.layout().addWidget(label)
+        return window
+
+    def show_done(self, save_file: str | None) -> None:
+        self._focus_or_create("done_win", lambda: self._build_done_window(save_file))
+
+    def _build_done_window(self, save_file: str | None) -> QWidget:
+        window = QWidget()
+        window.setWindowTitle("完成!")
+        window.setWindowIcon(QIcon(":/emipdf/acbel -1.jpg"))
+        window.resize(600, 200)
+        window.setLayout(QVBoxLayout())
+
+        saved_label = QLabel(
+            f'文件已保存为 "{os.path.abspath(save_file or "")}"', alignment=Qt.AlignLeft
         )
-        label_helpdoc.setWordWrap(True)
-        self.helpdoc_win.layout().addWidget(label_helpdoc)
+        window.layout().addWidget(saved_label)
 
-        self.helpdoc_win.show()
-        self.windows.append(self.helpdoc_win)
-
-    def show_done(self, SaveFile):
-        if hasattr(self, "done_win") and self.done_win is not None:
-            self.done_win.show()
-            self.done_win.activateWindow()
-            return
-        self.done_win = QWidget()
-        self.done_win.setWindowTitle("完成!")
-        icon = QIcon(":/emipdf/acbel -1.jpg")
-        self.done_win.setWindowIcon(icon)
-        self.done_win.resize(600, 200)
-        self.done_win.setLayout(QVBoxLayout())
-
-        label1 = QLabel(
-            f'文件已保存为 "{os.path.abspath(SaveFile)}"', alignment=Qt.AlignLeft
+        todo_label = QLabel(
+            text=(
+                "您还需要进行下列步骤以完成报告：\n"
+                "\t1. 填入日期，测试者等表头信息，注意是MP还是MVT.\n"
+                "\t2. 千万注意限值标准是否对应，默认Class B.\n"
+                "\t3. 插入测试图片和压缩包.\n"
+                "\t4. 整理表格，如果有多余项请按需求删除."
+            ),
+            alignment=Qt.AlignLeft,
         )
-        self.done_win.layout().addWidget(label1)
+        todo_label.setWordWrap(True)
+        window.layout().addWidget(todo_label)
 
-        label2_text = (
-            "您还需要进行下列步骤以完成报告：\n"
-            "\t1. 填入日期，测试者等表头信息，注意是MP还是MVT.\n"
-            "\t2. 千万注意限值标准是否对应，默认Class B.\n"
-            "\t3. 插入测试图片和压缩包.\n"
-            "\t4. 整理表格，如果有多余项请按需求删除."
-        )
-        label2 = QLabel(text=label2_text, alignment=Qt.AlignLeft)
-        label2.setWordWrap(True)
-        self.done_win.layout().addWidget(label2)
-
-        label3 = QLabel(
+        confirm_label = QLabel(
             "---------------请确认以上步骤都已完成，按OK退出。---------------",
             alignment=Qt.AlignLeft,
         )
-        self.done_win.layout().addWidget(label3)
+        window.layout().addWidget(confirm_label)
 
         ok_button = QPushButton("OK")
-        ok_button.clicked.connect(self.done_win.close)
-        self.done_win.layout().addWidget(ok_button)
+        ok_button.clicked.connect(window.close)
+        window.layout().addWidget(ok_button)
+        return window
 
-        self.done_win.show()
-        self.windows.append(self.done_win)
+    # ---- 日志窗口 -------------------------------------------------------- #
 
-    def open_template(self):
-        tmpFile = self.lineEdit_template.text()
-        loadqty = self.spin_qty.value()
-        # 检查是否存在模板文件，默认3个负载
-        if not tmpFile or tmpFile == "":
-            tmpFile = f"2.1 Conducted EMI Measurement_{loadqty}.xlsx"
-            if loadqty not in [3, 4]:
-                logger.warning(f"Unexpected load quantity: {loadqty}, defaulting to 3.")
-                tmpFile = "2.1 Conducted EMI Measurement_3.xlsx"
-            tmpFile = "template/" + tmpFile
+    def update_Setting(self) -> None:
+        for key, checkbox in self.settings.items():
+            self.settings_value[key] = checkbox.isChecked()
+        logger.info("设置已更新: %s", self.settings_value)
+        self.save_state()
 
-        if not os.path.exists(tmpFile):
-            tmpFile = self.select_templatepath()
-        else:
-            self.lineEdit_template.setText(os.path.abspath(tmpFile))
+    def update_log(self) -> None:
+        if self.Text_log is None:
+            return
+        if self.log_path is None:
+            self.log_path = os.path.join(os.getcwd(), LOG_FILENAME)
+        if not os.path.exists(self.log_path):
+            open(self.log_path, "w", encoding="utf-8").close()
+        with open(self.log_path, encoding="utf-8") as fp:
+            self.Text_log.setText(fp.read())
+
+    def export_log(self) -> None:
+        export_path, _ = QFileDialog.getSaveFileName(
+            self, "导出日志", filter="Log Files (*.log)"
+        )
+        if not export_path or self.log_path is None:
+            logger.debug("导出日志已取消。")
+            return
+        with open(self.log_path, encoding="utf-8") as source:
+            content = source.read()
+        with open(export_path, "w", encoding="utf-8") as target:
+            target.write(content)
+        logger.info("日志已导出: %s", export_path)
+
+    def clear_log(self) -> None:
+        if self.log_path is None:
+            return
+        with open(self.log_path, "w", encoding="utf-8"):
+            pass
+        if self.Text_log is not None:
+            self.Text_log.clear()
+        logger.info("日志已清空。")
+
+    # ---- 模板 ------------------------------------------------------------ #
+
+    def open_template(self) -> Any | None:
+        """打开报告模板并同步到界面；失败或取消时返回 None。"""
+        template_file = self.lineEdit_template.text()
+        load_qty = self.spin_qty.value()
+
+        if not template_file:
+            if load_qty not in SUPPORTED_LOAD_QTY:
+                logger.warning(
+                    "Unexpected load quantity: %s, defaulting to %s.",
+                    load_qty,
+                    DEFAULT_LOAD_QTY,
+                )
+                load_qty = DEFAULT_LOAD_QTY
+            template_file = os.path.join(
+                TEMPLATE_DIR, f"2.1 Conducted EMI Measurement_{load_qty}.xlsx"
+            )
+
+        if not os.path.exists(template_file):
+            logger.warning("未找到模板文件: %s", template_file)
+            selected = self.select_templatepath()
+            if not selected:
+                return None
+            template_file = selected
+
+        # 记录最终使用的模板路径（main_func 依赖它推导输出文件名）
+        self.lineEdit_template.setText(os.path.abspath(template_file))
 
         try:
-            wb = xl.load_workbook(tmpFile)
+            return xl.load_workbook(template_file)
         except FileNotFoundError:
-            logger.warning(f"No template file found: {tmpFile}")
-            QMessageBox.warning(self, "Warning", f"No template file found: {tmpFile}")
-            return
-        except Exception as e:
-            logger.error(f"Error opening template file: {e}")
-            QMessageBox.warning(self, "Error", f"Error opening template file: {e}")
-            return
-        return wb
-
-    def get_testdetail(self):
-        wb = self.open_template()
-        if wb is None:
-            return
-        ws = wb["Conducted EMI"]
-        RpDetail = ws.cell(8, 6).value
-        self.text_detail.setText(RpDetail)
-        wb.close()
-
-    def main_func(self, res):
-        directory = self.lineEdit_model.text()
-        loadqty = self.spin_qty.value()
-        tmpFile = self.lineEdit_template.text()
-
-        wb = self.open_template()
-        if wb is None:
-            return
-        ws_setup = wb["Setup"]
-
-        self.row_sn_ = ws_setup.cell(row=1, column=2).value
-        self.col_sn_ = ws_setup.cell(row=2, column=2).value
-        self.col_vol_ = ws_setup.cell(row=3, column=2).value
-        self.col_line_ = ws_setup.cell(row=4, column=2).value
-        self.col_load_ = ws_setup.cell(row=5, column=2).value
-        self.row_end_ = ws_setup.cell(row=7, column=2).value
-        self.col_end_ = ws_setup.cell(row=8, column=2).value
-
-        ws = wb["Conducted EMI"]
-
-        if not os.path.exists(directory):
-            logger.warning(f"No such directory: {directory}")
-            QMessageBox.warning(self, "Warning", f"No such directory: {directory}")
-            return
-
-        directory = os.path.realpath(directory)
-        root_dir = os.path.dirname(directory)
-        directory = os.path.basename(directory)
-
-        os.chdir(root_dir)  # 改变工作目录
-
-        # 写入单体型号
-        tmpp = directory.split("-")
-        if len(tmpp) > 1:
-            ws["F5"] = uutname = tmpp[0] + "-" + tmpp[1]
-        else:
-            ws["F5"] = uutname = directory
-        # 测试日期
-        ws["F6"] = self.date_test.date().toString("yyyy/MM/dd")
-        # 工令
-        ws["F44"] = self.lineEdit_workerno.text()
-        # 版本
-        ws["H44"] = self.lineEdit_rev.text()
-        # D/C
-        ws["I44"] = self.lineEdit_week.text()
-        # 测试detail
-        ws["F8"] = self.text_detail.toPlainText()
-        # 放置图片
-        img_path = self.lineEdit_img.text()
-        if os.path.exists(img_path):
-            img_path = os.path.realpath(img_path)
-            with PImage.open(img_path) as pimg:
-                if pimg.mode in ("RGBA", "P"):
-                    pimg = pimg.convert("RGB")
-                ratio = 250 / pimg.height
-                new_size = (int(pimg.width * ratio), int(pimg.height * ratio))
-                pimg = pimg.resize(new_size, PImage.Resampling.LANCZOS)
-
-                buffer = BytesIO()
-                pimg.save(buffer, format="JPEG", quality=100, optimize=True)
-                buffer.seek(0)
-
-            img = image.Image(buffer)
-            ws.add_image(img, "C27")
-
-        test_count = len(set([it.split("-")[0] for it in res.keys()]))
-
-        if test_count > 5:
-            logger.warning(f"Number of Load is too many! {test_count}")
+            logger.warning("未找到模板文件: %s", template_file)
             QMessageBox.warning(
-                self, "Warning", f"Number of Load is too many! {test_count}"
+                self, "Warning", f"No template file found: {template_file}"
+            )
+        except Exception as exc:
+            logger.exception("打开模板文件失败: %s", exc)
+            QMessageBox.warning(self, "Error", f"Error opening template file: {exc}")
+        return None
+
+    def get_testdetail(self) -> None:
+        """从模板的测试细节单元格读取内容填入界面。"""
+        workbook = self.open_template()
+        if workbook is None:
+            return
+        sheet = workbook[REPORT_SHEET_NAME]
+        detail = sheet[HEADER_CELL_DETAIL].value or ""
+        self.text_detail.setText(detail)
+        workbook.close()
+        logger.info("已从模板读取测试细节: %d 字符", len(detail))
+
+    def _load_anchors(self, setup_sheet) -> None:
+        """用模板 Setup 表中的数值覆盖行列锚点。"""
+        for attr_name, row in SETUP_ANCHOR_ROWS.items():
+            value = setup_sheet.cell(row=row, column=SETUP_ANCHOR_COLUMN).value
+            if value is not None:
+                setattr(self, attr_name, value)
+
+    # ---- 主流程 ---------------------------------------------------------- #
+
+    def main_func(self, report_data: dict[str, dict[str, Any]]) -> None:
+        """把解析结果写入模板并保存，随后按设置压缩、嵌入压缩包。"""
+        started_at = time.perf_counter()
+        model_dir = self.lineEdit_model.text()
+        load_qty = self.spin_qty.value()
+
+        workbook = self.open_template()
+        if workbook is None:
+            return
+        template_file = self.lineEdit_template.text()
+
+        self._load_anchors(workbook[SETUP_SHEET_NAME])
+        sheet = workbook[REPORT_SHEET_NAME]
+
+        if not os.path.exists(model_dir):
+            logger.warning("数据目录不存在: %s", model_dir)
+            QMessageBox.warning(self, "Warning", f"No such directory: {model_dir}")
+            return
+
+        if not report_data:
+            logger.warning("没有可写入的报告数据，已取消生成: %s", model_dir)
+            QMessageBox.warning(
+                self,
+                "Warning",
+                f"没有可写入的数据，请确认目录内有 EMI PDF 报告:\n{model_dir}",
             )
             return
 
-        # 处理合并单元格
-        merged_cells = list(ws.merged_cells)
-        for cell in merged_cells:
-            if cell.min_row == self.row_sn_ + loadqty * 4 * test_count:
-                ws.unmerge_cells(cell.coord)
-
-        # 删去多余的行
-        ws.delete_rows(
-            self.row_sn_ + loadqty * 4 * test_count,
-            loadqty * 4 * (5 - test_count),
+        model_dir = os.path.realpath(model_dir)
+        root_dir = os.path.dirname(model_dir)
+        model_dir_name = os.path.basename(model_dir)
+        os.chdir(root_dir)  # 后续相对路径（输出文件、zip）均基于该目录
+        logger.info(
+            "开始生成报告: 数据目录=%s, 模板=%s, 负载数量=%s, 报告数=%d, 设置=%s",
+            model_dir,
+            template_file,
+            load_qty,
+            len(report_data),
+            self.settings_value,
         )
-        self.row_end_ = ws.max_row - 4
-        logger.info(f"Max row after deletion: {self.row_end_}")
 
-        # 写入数据
-        line_dict = {"L1": "Line", "N": "Neutral"}
-        for item_key, datas in res.items():
+        uut_name = self._write_header(sheet, model_dir_name)
+        self._insert_test_image(sheet)
+
+        uut_count = len({name.split("-")[0] for name in report_data})
+        if uut_count > MAX_UUT_COUNT:
+            logger.warning(
+                "负载类型过多: %s（模板最多支持 %d 种）", uut_count, MAX_UUT_COUNT
+            )
+            QMessageBox.warning(
+                self, "Warning", f"Number of Load is too many! {uut_count}"
+            )
+            return
+
+        self._resize_report_rows(sheet, load_qty, uut_count)
+        self._write_measurements(sheet, report_data, load_qty)
+
+        save_file = re.sub(
+            TEMPLATE_NAME_PATTERN, f"_{uut_name}.xlsx", os.path.basename(template_file)
+        )
+        workbook.remove(workbook[SETUP_SHEET_NAME])
+        workbook.save(save_file)
+        self.save_file_name = save_file
+        logger.info(
+            "报告已保存: %s（写入 %d 份测量数据，用时 %.1f 秒）",
+            os.path.abspath(save_file),
+            len(report_data),
+            time.perf_counter() - started_at,
+        )
+
+        if self.settings_value["NeedZip"]:
+            try:
+                self.zip_folder(model_dir_name, uut_name)
+            except Exception as exc:
+                logger.exception("Error during zipping or embedding: %s", exc)
+                QMessageBox.critical(
+                    self, "Error", f"Error during zipping or embedding: {exc}"
+                )
+
+    def _write_header(self, sheet, model_dir_name: str) -> str:
+        """写入表头信息，返回单体型号名。"""
+        parts = model_dir_name.split("-")
+        uut_name = "-".join(parts[:2]) if len(parts) > 1 else model_dir_name
+        test_date = self.date_test.date().toString("yyyy/MM/dd")
+        workno = self.lineEdit_workerno.text()
+        revision = self.lineEdit_rev.text()
+        week = self.lineEdit_week.text()
+        detail = self.text_detail.toPlainText()
+
+        sheet[HEADER_CELL_MODEL] = uut_name
+        sheet[HEADER_CELL_DATE] = test_date
+        sheet[HEADER_CELL_WORKNO] = workno
+        sheet[HEADER_CELL_REV] = revision
+        sheet[HEADER_CELL_WEEK] = week
+        sheet[HEADER_CELL_DETAIL] = detail
+
+        logger.info(
+            "表头写入: 型号=%s, 日期=%s, 工令=%s, 版本=%s, 周期=%s, 测试细节 %d 字符",
+            uut_name,
+            test_date,
+            workno,
+            revision,
+            week,
+            len(detail),
+        )
+        return uut_name
+
+    def _insert_test_image(self, sheet) -> None:
+        """把测试图片等比缩放后插入模板的指定位置。"""
+        image_path = self.lineEdit_img.text()
+        if not image_path:
+            logger.info("未选择测试图片，跳过图片插入。")
+            return
+        if not os.path.exists(image_path):
+            logger.warning("测试图片不存在，已跳过图片插入: %s", image_path)
+            return
+
+        try:
+            with PImage.open(os.path.realpath(image_path)) as source:
+                picture = (
+                    source.convert("RGB") if source.mode in ("RGBA", "P") else source
+                )
+                ratio = IMAGE_HEIGHT_PIXELS / picture.height
+                picture = picture.resize(
+                    (int(picture.width * ratio), int(picture.height * ratio)),
+                    PImage.Resampling.LANCZOS,
+                )
+                buffer = BytesIO()
+                picture.save(
+                    buffer, format="JPEG", quality=IMAGE_JPEG_QUALITY, optimize=True
+                )
+                buffer.seek(0)
+                new_size = picture.size
+
+            sheet.add_image(image.Image(buffer), IMAGE_ANCHOR_CELL)
+            logger.info(
+                "已插入测试图片: %s -> %s（缩放为 %dx%d）",
+                image_path,
+                IMAGE_ANCHOR_CELL,
+                new_size[0],
+                new_size[1],
+            )
+        except Exception:
+            logger.exception("插入测试图片失败，已跳过: %s", image_path)
+
+    def _resize_report_rows(self, sheet, load_qty: int, uut_count: int) -> None:
+        """按实际机种数量删除模板中多余的机种区段。"""
+        block_rows = load_qty * ROWS_PER_UUT_UNIT
+        first_spare_row = self.row_sn_ + block_rows * uut_count
+
+        for cell_range in list(sheet.merged_cells):
+            if cell_range.min_row == first_spare_row:
+                sheet.unmerge_cells(cell_range.coord)
+
+        sheet.delete_rows(first_spare_row, block_rows * (MAX_UUT_COUNT - uut_count))
+        self.row_end_ = sheet.max_row - REPORT_TAIL_ROWS
+        logger.info(
+            "报告行调整: 机种数=%d, 每机种行数=%d, 自第 %d 行起删除 %d 行, 数据结束行=%d",
+            uut_count,
+            block_rows,
+            first_spare_row,
+            block_rows * (MAX_UUT_COUNT - uut_count),
+            self.row_end_,
+        )
+
+    def _write_measurements(
+        self, sheet, report_data: dict[str, dict[str, Any]], load_qty: int
+    ) -> None:
+        """逐份报告定位到对应行并写入测量数据。"""
+        for datas in report_data.values():
             row_sn = self.row_sn_
             while (
-                ws.cell(row=row_sn, column=self.col_sn_).value is not None
-                and ws.cell(row=row_sn, column=self.col_sn_).value != datas["Serial"]
+                sheet.cell(row=row_sn, column=self.col_sn_).value is not None
+                and sheet.cell(row=row_sn, column=self.col_sn_).value != datas["Serial"]
             ):
-                row_sn += loadqty * 4
-            if ws.cell(row=row_sn, column=self.col_sn_).value is None:
-                ws.cell(row=row_sn, column=self.col_sn_).value = datas["Serial"]
+                row_sn += load_qty * ROWS_PER_UUT_UNIT
+            if sheet.cell(row=row_sn, column=self.col_sn_).value is None:
+                sheet.cell(row=row_sn, column=self.col_sn_).value = datas["Serial"]
 
             row_vol = row_sn + (
-                loadqty * 2
-                if ws.cell(row=row_sn, column=self.col_vol_).value
+                load_qty * ROWS_PER_LOAD_STEP
+                if sheet.cell(row=row_sn, column=self.col_vol_).value
                 != int(re.match(r"\d+", datas["Power"]).group())
                 else 0
             )
             row_load = row_vol
             try:
-                while row_load < row_vol + (loadqty * 2) and int(
-                    ws.cell(row=row_load, column=self.col_load_).value * 100
+                while row_load < row_vol + (load_qty * ROWS_PER_LOAD_STEP) and int(
+                    sheet.cell(row=row_load, column=self.col_load_).value * 100
                 ) != int(re.match(r"\d+", datas["Load"]).group()):
-                    row_load += 2
-            except Exception as e:
-                msg = self.tr("负载数量与模板不符！")
-                logger.error(msg)
-                QMessageBox.information(self, "错误", msg)
+                    row_load += ROWS_PER_LOAD_STEP
+            except Exception:
+                message = self.tr("负载数量与模板不符！")
+                logger.exception(message)
+                QMessageBox.information(self, "错误", message)
                 return
 
-            data = datas["datas"][0]
+            measurement = datas["datas"][0]
             row_line = (
                 row_load + 1
-                if ws.cell(row=row_load, column=self.col_line_).value
-                != line_dict.get(data[9], "Unknown")
+                if sheet.cell(row=row_load, column=self.col_line_).value
+                != LINE_LABELS.get(measurement[PDF_LINE_COLUMN], "Unknown")
                 else row_load
             )
-            # 写入数据
-            ws.cell(row=row_line, column=self.col_load_ + 1).value = data[0]
-            ws.cell(row=row_line, column=self.col_load_ + 2).value = data[1]
-            ws.cell(row=row_line, column=self.col_load_ + 3).value = data[3]
-            ws.cell(row=row_line, column=self.col_load_ + 4).value = data[6]
-            ws.cell(row=row_line, column=self.col_load_ + 5).value = "-"
-            ws.cell(row=row_line, column=self.col_load_ + 6).value = data[2]
-            ws.cell(row=row_line, column=self.col_load_ + 7).value = data[5]
-
-        # 保存文件
-        SaveFile = re.sub(r"_\d\.xlsx", f"_{uutname}.xlsx", os.path.basename(tmpFile))
-        wb.remove(ws_setup)
-        wb.save(SaveFile)
-        self.save_file_name = SaveFile
-        logger.info("Writted into report.")
-        if self.settings_value["NeedZip"]:
-            try:
-                self.zip_folder(directory, uutname)
-            except Exception as e:
-                logger.error(f"Error during zipping or embedding: {e}")
-                QMessageBox.critical(
-                    self, "Error", f"Error during zipping or embedding: {e}"
+            for offset, source_index in MEASUREMENT_CELL_SOURCES:
+                value = (
+                    EMPTY_MARK if source_index is None else measurement[source_index]
                 )
+                sheet.cell(row=row_line, column=self.col_load_ + offset).value = value
 
-    def getpdfdatas(self):
+            logger.debug(
+                "写入 %s: 序号行=%d, 电压行=%d, 负载行=%d, 数据行=%d",
+                datas.get("Serial"),
+                row_sn,
+                row_vol,
+                row_load,
+                row_line,
+            )
+
+        logger.info("测量数据写入完成: 共 %d 份", len(report_data))
+
+    # ---- PDF 解析调度 ---------------------------------------------------- #
+
+    def getpdfdatas(self) -> None:
+        """启动 PDF 解析线程，并在状态栏显示进度。"""
         if self.getpdf_running:
-            logger.warning("Getting PDF is already running, do not start again")
+            logger.warning("PDF 解析正在进行，忽略重复启动。")
             return
-        self.getpdf_running = True
-        logger.info("Getting PDF start")
 
         directory = self.lineEdit_model.text()
-        source_files = [f for f in os.listdir(directory) if f.endswith(".pdf")]
-        self.file_count = len(source_files)
+        if not os.path.isdir(directory):
+            logger.warning("数据目录不存在，无法开始处理: %s", directory)
+            QMessageBox.warning(self, "Warning", f"数据目录不存在: {directory}")
+            return
 
-        # 创建状态栏进度条
+        source_files = [name for name in os.listdir(directory) if name.endswith(".pdf")]
+        if not source_files:
+            logger.warning("目录内没有 PDF 文件: %s", directory)
+            QMessageBox.warning(self, "Warning", f"目录内没有 PDF 文件: {directory}")
+            return
+
+        self.getpdf_running = True
+        self.file_count = len(source_files)
+        logger.info("开始处理: 目录=%s, PDF 数量=%d", directory, self.file_count)
+
         self.statusBar().showMessage("正在处理文件...")
         self.progressBar = QProgressBar(self.statusBar_main)
         self.progressBar.setMaximumHeight(15)
@@ -739,88 +1118,50 @@ class EMIWindow(MainWindow):
         self.progressBar.setValue(0)
         self.statusBar().addPermanentWidget(self.progressBar)
 
-        # 启动处理线程
         self.process_thread = ProcessPdfThread(directory)
         self.process_thread.progress_updated.connect(self.updateProgressBar)
         self.process_thread.processing_finished.connect(self.onProcessingFinished)
         self.process_thread.processing_error.connect(self.onProcessingError)
         self.process_thread.start()
 
-    def onProcessingFinished(self, result):
-        self.res = result
-        self.statusBar().removeWidget(self.progressBar)
-        # 继续后续处理
-        self.main_func(self.res)
+    def onProcessingFinished(self, result: dict[str, dict[str, Any]]) -> None:
+        self.report_data = result
+        self._remove_progress_bar()
+        logger.info("解析结果已就绪: %d 份报告", len(result))
+        self.main_func(self.report_data)
         self.getpdf_running = False
 
-    def onProcessingError(self, error_msg):
-        logger.error(f"Pdf Processing error: {error_msg}")
+    def onProcessingError(self, error_msg: str) -> None:
+        logger.exception("PDF 解析出错: %s", error_msg)
         QMessageBox.critical(self, "Error", f"Pdf Processing error: {error_msg}")
-        self.statusBar().removeWidget(self.progressBar)
+        self._remove_progress_bar()
+        self.getpdf_running = False
 
-    def updateProgressBar(self):
+    def updateProgressBar(self) -> None:
+        if self.progressBar is None:
+            return
         value = self.progressBar.value() + 1
         self.progressBar.setValue(value)
         self.statusBar().showMessage(f"正在处理文件...{value}/{self.file_count}")
 
-    def addZipToExcel(self, zipname, SaveFile):
-        excel = self.open_Excel()
-        if excel is None:
-            return
-        try:
-            wb = excel.Workbooks.Open(os.path.abspath(SaveFile))
-            ws = wb.Worksheets("Conducted EMI")
-            if ws.ProtectContents:
-                ws.Unprotect()
-            ws.Cells(self.row_sn_, self.col_end_ - 2).Select()
-            ws.OLEObjects().Add(
-                ClassType=None,
-                Filename=os.path.abspath(f"{zipname}.zip"),
-                Link=False,
-                DisplayAsIcon=True,
-            )
-            # xlEdgeButtom = 9; xlMedium = -4138; xlContinuous = 1
-            ws.Range(
-                ws.Cells(self.row_end_, 2), ws.Cells(self.row_end_, self.col_end_ - 1)
-            ).Select()
-            ws.Range(
-                ws.Cells(self.row_end_, 2), ws.Cells(self.row_end_, self.col_end_ - 1)
-            ).Borders(9).LineStyle = 1
-            ws.Range(
-                ws.Cells(self.row_end_, 2), ws.Cells(self.row_end_, self.col_end_ - 1)
-            ).Borders(9).Weight = -4138
-            wb.Save()
-            if self.settings_value["CloseExcel"]:
-                excel.Quit()
-        except Exception as e:
-            logger.error(f"Error adding zip to Excel: {e}")
-            QMessageBox.critical(self, "Error", f"Error adding zip to Excel: {e}")
+    def _remove_progress_bar(self) -> None:
+        if self.progressBar is not None:
+            self.statusBar().removeWidget(self.progressBar)
+            self.progressBar = None
 
-    def open_Excel(self):
-        while True:
-            try:
-                excel = win32.Dispatch("Excel.Application")
-                excel.Visible = True
-                return excel
-            except:
-                logger.error("Please install Microsoft Excel 2010 or later.")
-                reply = QMessageBox.information(
-                    self,
-                    self.tr("Excel打开失败"),
-                    self.tr("请安装 Microsoft Excel 2010或更新的版本。是否重试？"),
-                    QMessageBox.StandardButton.Yes,
-                    QMessageBox.StandardButton.No,
-                )
-                if reply == QMessageBox.StandardButton.No:
-                    return None
+    # ---- 压缩与嵌入 ------------------------------------------------------ #
 
-    def zip_folder(self, directory, zipname):
-        logger.info("Zipping folder...")
-        file_count = 0
-        for rootPath, _, files in os.walk(directory):
-            for _file in files:
-                if _file.endswith(".pdf"):
-                    file_count += 1
+    def zip_folder(self, directory: str, zipname: str) -> None:
+        """启动压缩线程，并在状态栏显示进度。"""
+        file_count = sum(
+            1
+            for _root, _dirs, files in os.walk(directory)
+            for name in files
+            if name.endswith(".pdf")
+        )
+        logger.info(
+            "开始压缩: 目录=%s, 文件数=%d, 输出=%s.zip", directory, file_count, zipname
+        )
         self.zip_progressBar = QProgressBar(self.statusBar_main)
         self.zip_progressBar.setMaximumHeight(15)
         self.zip_progressBar.setMaximum(file_count)
@@ -836,44 +1177,115 @@ class EMIWindow(MainWindow):
         self.zip_thread.zip_error.connect(self.onZipError)
         self.zip_thread.start()
 
-    def updateZipProgressBar(self, value):
-        # 更新压缩进度条
-
+    def updateZipProgressBar(self, value: int) -> None:
+        if self.zip_progressBar is None:
+            return
         self.zip_progressBar.setValue(value)
         self.statusBar().showMessage(
             f"正在压缩文件...{value}/{self.zip_progressBar.maximum()}"
         )
 
-    def onZipFinished(self, zipname):
-        # 压缩完成处理
-        if hasattr(self, "zip_progressBar"):
+    def onZipFinished(self, zipname: str) -> None:
+        if self.zip_progressBar is not None:
             self.statusBar().removeWidget(self.zip_progressBar)
-            del self.zip_progressBar
+            self.zip_progressBar = None
             self.statusBar().showMessage("压缩完成！")
 
-        # 如果需要嵌入Excel，则继续执行
-        SaveFile = getattr(self, "save_file_name", None)  # 获取保存的文件名
-        if SaveFile and self.settings_value["AddZip"]:
-            self.addZipToExcel(zipname, SaveFile)
+        if self.save_file_name and self.settings_value["AddZip"]:
+            self.add_zip_to_excel(zipname, self.save_file_name)
 
-        logger.info("Zip finished")
-        self.show_done(SaveFile)
+        logger.info("压缩流程结束: %s", zipname)
+        self.show_done(self.save_file_name)
 
-    def onZipError(self, error_msg):
-        # 压缩错误处理
-        logger.error(f"Error zipping folder: {error_msg}")
-        if hasattr(self, "zip_progressBar"):
+    def onZipError(self, error_msg: str) -> None:
+        logger.error("压缩出错: %s", error_msg)
+        if self.zip_progressBar is not None:
             self.statusBar().removeWidget(self.zip_progressBar)
-            del self.zip_progressBar
+            self.zip_progressBar = None
         QMessageBox.critical(self, "Error", f"Error zipping folder: {error_msg}")
+
+    def open_excel(self):
+        """取得 Excel COM 对象；创建失败时询问用户是否重试（放弃则返回 None）。"""
+        while True:
+            try:
+                excel = win32.Dispatch("Excel.Application")
+            except Exception:
+                logger.exception(
+                    "无法启动 Excel，请确认已安装 Microsoft Excel 2010 或更高版本。"
+                )
+                reply = QMessageBox.information(
+                    self,
+                    self.tr("Excel打开失败"),
+                    self.tr("请安装 Microsoft Excel 2010或更新的版本。是否重试？"),
+                    QMessageBox.StandardButton.Yes,
+                    QMessageBox.StandardButton.No,
+                )
+                if reply == QMessageBox.StandardButton.No:
+                    logger.warning("用户放弃启动 Excel，跳过压缩包嵌入。")
+                    return None
+                continue
+            excel.Visible = True
+            logger.debug("Excel 已启动。")
+            return excel
+
+    def add_zip_to_excel(self, zipname: str, save_file: str) -> None:
+        """把压缩包作为 OLE 对象嵌入报告的最后一页并补齐边框。"""
+        excel = self.open_excel()
+        if excel is None:
+            return
+        logger.info("开始嵌入压缩包: %s.zip -> %s", zipname, save_file)
+        try:
+            workbook = excel.Workbooks.Open(os.path.abspath(save_file))
+            sheet = workbook.Worksheets(REPORT_SHEET_NAME)
+            if sheet.ProtectContents:
+                logger.info("工作表处于保护状态，已取消保护: %s", REPORT_SHEET_NAME)
+                sheet.Unprotect()
+
+            sheet.Cells(self.row_sn_, self.col_end_ - 2).Select()
+            sheet.OLEObjects().Add(
+                ClassType=None,
+                Filename=os.path.abspath(f"{zipname}.zip"),
+                Link=False,
+                DisplayAsIcon=True,
+            )
+
+            # xlEdgeBottom = 9; xlMedium = -4138; xlContinuous = 1
+            border_range = sheet.Range(
+                sheet.Cells(self.row_end_, 2),
+                sheet.Cells(self.row_end_, self.col_end_ - 1),
+            )
+            border_range.Select()
+            border_range.Borders(9).LineStyle = 1
+            border_range.Borders(9).Weight = -4138
+
+            workbook.Save()
+            logger.info("压缩包已嵌入并保存: %s", os.path.abspath(save_file))
+            if self.settings_value["CloseExcel"]:
+                excel.Quit()
+                logger.info("已按设置关闭 Excel。")
+        except Exception as exc:
+            logger.exception("嵌入压缩包到 Excel 失败: %s", exc)
+            QMessageBox.critical(self, "Error", f"Error adding zip to Excel: {exc}")
 
 
 if __name__ == "__main__":
     app = QApplication()
+    # 组织名 / 应用名决定界面状态文件的存放位置（用户配置目录）
+    app.setOrganizationName("Acbel")
+    app.setApplicationName("EMI-Report")
+
+    logger.info(
+        "EMI-Report 启动: Python %s, PySide6 %s, 工作目录=%s, 日志文件=%s",
+        sys.version.split()[0],
+        pyside_version,
+        os.getcwd(),
+        os.path.join(os.getcwd(), LOG_FILENAME),
+    )
+
     win = EMIWindow()
 
-    # apply_stylesheet(app, theme="dark_teal.xml")
+    # 主题已改用 Qt 默认样式：apply_stylesheet(app, theme="dark_teal.xml")
     win.show()
     sys.exit(app.exec())
 
-    # win.addZipToExcel("FSC048-4C0G", "2.1 Conducted EMI Measurement.xlsx")
+    # win.add_zip_to_excel("FSC048-4C0G", "2.1 Conducted EMI Measurement.xlsx")

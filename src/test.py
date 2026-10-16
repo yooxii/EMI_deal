@@ -1,4 +1,5 @@
 import os
+
 import win32com.client as win32
 from docx import Document
 
@@ -7,8 +8,8 @@ def addZipToExcel(self, directory, SaveFile):
     try:
         excel = win32.Dispatch("Excel.Application")
         excel.Visible = True
-    except:
-        print("Please install Microsoft Word 2010 or later.")
+    except Exception as exc:
+        print(f"Please install Microsoft Word 2010 or later. ({exc})")
         return
     wb = excel.Workbooks.Open(os.path.abspath(SaveFile))
     ws = wb.Worksheets("Conducted EMI")
@@ -31,8 +32,8 @@ def WordM():
     try:
         word = win32.Dispatch("Word.Application")
         # word.Visible = 0
-    except:
-        print("Please install Microsoft Word 2010 or later.")
+    except Exception as exc:
+        print(f"Please install Microsoft Word 2010 or later. ({exc})")
         return
     doc = word.Documents.Open(
         os.path.abspath(

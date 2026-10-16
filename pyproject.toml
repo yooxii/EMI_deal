@@ -1,7 +1,7 @@
 [project]
 name = "pdf-deal"
-version = "0.1.0"
-description = "Add your description here"
+version = "2.0"
+description = "EMI 报告自动化：PDF 报告解析 → Excel 模板写入 → 压缩包嵌入"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
@@ -18,3 +18,30 @@ dependencies = [
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
+
+[tool.black]
+line-length = 88
+target-version = ["py38"]
+# src/ui 是已废弃的旧界面目录，res_rc.py 是 qrc 编译产物，不参与格式化
+extend-exclude = '''(\.venv|build|dist|src/ui|src/gui/res_rc\.py)'''
+
+[tool.ruff]
+line-length = 88
+target-version = "py38"
+src = ["src"]
+extend-exclude = [".venv", "build", "dist", "src/ui", "src/gui/res_rc.py"]
+
+[tool.ruff.lint]
+# E/F/W：pycodestyle + pyflakes；I：import 排序；UP：pyupgrade；B：bugbear；
+# C4：推导式；SIM：可简化写法；RET：返回语句；G：日志格式
+select = ["E4", "E7", "E9", "F", "W", "I", "UP", "B", "C4", "SIM", "RET", "G"]
+ignore = [
+    "E501",   # 行宽交给 black
+    "SIM108", # 不强制把 if/else 压成三元表达式
+    "RET504", # 允许先赋值再 return，便于调试
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 开发期试验脚本，含本机绝对路径与顺序依赖的 import，不纳入严格检查
+"src/test.py" = ["E402", "F401", "B007"]
+"src/test_openpyxl.py" = ["E402"]
