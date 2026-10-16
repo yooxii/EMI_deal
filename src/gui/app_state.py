@@ -35,6 +35,7 @@ KEY_IMAGE_PATH = "image_path"
 KEY_TEST_DETAIL = "test_detail"
 KEY_TEST_DATE = "test_date"
 KEY_SETTINGS = "settings"
+KEY_SERIAL_OVERRIDES = "serial_overrides"  # {序列号: [工令, 版本]}
 
 
 def state_directory() -> str:

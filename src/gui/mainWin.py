@@ -13,12 +13,14 @@ import logging
 from PySide6.QtCore import QDate, QRect, QSize, Qt
 from PySide6.QtGui import QAction, QCursor, QIcon, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QDateEdit,
     QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -29,6 +31,7 @@ from PySide6.QtWidgets import (
     QSpacerItem,
     QSpinBox,
     QStatusBar,
+    QTableWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -40,6 +43,8 @@ from gui.widgets import ClickableLabel
 logger = logging.getLogger(__name__)
 
 SERIAL_VIEW_HEIGHT = 50  # 序列号显示区高度
+SERIAL_TABLE_HEIGHT = 110  # 按序列号填写表格的高度（超出可滚动）
+SERIAL_HEADER_WIDTH = 200  # 表格行标题宽度（显示序列号）
 
 
 class HoverLineEdit(QLineEdit):
@@ -90,8 +95,8 @@ class MainWindow(QMainWindow):
     def setupUi(self) -> None:
         self.setWindowTitle(self.tr("EMI-Report"))
         self.setObjectName("MainWindow")
-        # 比旧版高一些：新增了「序列号」显示区
-        self.resize(600, 520)
+        # 比旧版高一些：新增了「序列号」显示区与「按序列号填写」表格
+        self.resize(600, 680)
         icon = QIcon()
         icon.addFile(":/emipdf/acbel -1.jpg", QSize(), QIcon.Normal, QIcon.Off)
         self.setWindowIcon(icon)
@@ -134,7 +139,34 @@ class MainWindow(QMainWindow):
         self._build_path_rows(input_layout)
         input_layout.addWidget(self._build_serial_box())
         input_layout.addWidget(self._build_info_box())
+        input_layout.addWidget(self._build_serial_table_box())
         self._build_action_buttons(input_layout)
+
+    def _build_serial_table_box(self) -> QGroupBox:
+        """按序列号填写工令 / 版本（留空则用「补充信息」里的默认值）。
+
+        行标题显示序列号，两列分别是工令与版本；行随数据路径下的序列号自动刷新。
+        """
+        table_box = QGroupBox(self.tr("按序列号填写工令 / 版本（留空用上面的默认值）"))
+        table_layout = QVBoxLayout(table_box)
+
+        self.table_serial = QTableWidget(0, 2)
+        self.table_serial.setHorizontalHeaderLabels([self.tr("工令"), self.tr("版本")])
+        self.table_serial.verticalHeader().setFixedWidth(SERIAL_HEADER_WIDTH)
+        self.table_serial.verticalHeader().setDefaultAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.table_serial.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.table_serial.setAlternatingRowColors(True)
+        self.table_serial.setFixedHeight(SERIAL_TABLE_HEIGHT)
+        self.table_serial.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.SelectedClicked
+        )
+        table_layout.addWidget(self.table_serial)
+        return table_box
 
     def _build_serial_box(self) -> QGroupBox:
         """序列号显示区（位于「补充信息」上方）。
@@ -289,12 +321,20 @@ class MainWindow(QMainWindow):
         self.btn_start.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.btn_start.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
 
+        self.btn_clear = QPushButton(self.tr("清空"))
+        self.btn_clear.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.btn_clear.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_clear.setToolTip(
+            self.tr("清空除「模版路径」「测试细节」以外的输入内容。")
+        )
+
         self.btn_exit = QPushButton(self.tr("退出"))
         self.btn_exit.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.btn_exit.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
 
         buttons = QHBoxLayout()
         buttons.addWidget(self.btn_start)
+        buttons.addWidget(self.btn_clear)
         buttons.addWidget(self.btn_exit)
         input_layout.addLayout(buttons)
 
@@ -307,8 +347,12 @@ class MainWindow(QMainWindow):
         self.menuSelect.setTitle(self.tr("选项"))
         self.action_sets = QAction(self.tr("设置"), self.menuSelect)
         self.action_sets.setShortcut("Ctrl+I")
+        self.action_restart = QAction(self.tr("重启"), self.menuSelect)
+        self.action_restart.setShortcut("Ctrl+R")
+        self.action_restart.setToolTip(self.tr("重启程序，输入内容与设置会保留。"))
         self.action_exit = QAction(self.tr("退出"), self.menuSelect)
         self.menuSelect.addAction(self.action_sets)
+        self.menuSelect.addAction(self.action_restart)
         self.menuSelect.addAction(self.action_exit)
 
         self.menuTool = QMenu(self.mainMenuBar)

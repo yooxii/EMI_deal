@@ -20,7 +20,16 @@ import win32com.client as win32
 from openpyxl.drawing import image
 from PIL import Image as PImage
 from PySide6 import __version__ as pyside_version
-from PySide6.QtCore import QDate, QSize, QStandardPaths, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import (
+    QDate,
+    QProcess,
+    QSize,
+    QStandardPaths,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -32,6 +41,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -42,6 +52,7 @@ from gui.app_state import (
     KEY_LOAD_QTY,
     KEY_MODEL_PATH,
     KEY_REV,
+    KEY_SERIAL_OVERRIDES,
     KEY_SETTINGS,
     KEY_TEMPLATE_PATH,
     KEY_TEST_DATE,
@@ -62,7 +73,7 @@ from naming import collect_name_tokens
 
 LOG_FILENAME = "EMIRper.log"
 APP_TITLE = "EMI-Report"  # 窗口标题前缀（后面跟随数据路径的文件夹名）
-APP_VERSION = "2.1"
+APP_VERSION = "2.2"
 STATE_SAVE_DELAY_MS = 300  # 输入变化后延迟落盘的防抖时间
 SERIAL_REFRESH_DELAY_MS = 500  # 数据路径变化后延迟刷新序列号的防抖时间
 REPORT_FILE_SUFFIX = ".pdf"  # 提取序列号时依据的报告文件后缀
@@ -113,9 +124,9 @@ DEFAULT_ANCHORS = {  # 未读到模板时使用的兜底锚点
 HEADER_CELL_MODEL = "F5"  # 单体型号
 HEADER_CELL_DATE = "F6"  # 测试日期
 HEADER_CELL_DETAIL = "F8"  # 测试细节
-HEADER_CELL_WORKNO = "F44"  # 工令
-HEADER_CELL_REV = "H44"  # 版本
-HEADER_CELL_WEEK = "I44"  # 周期 / D/C
+WORKNO_COLUMN = 6  # F 列：每个序列号块的工令
+REV_COLUMN = 8  # H 列：每个序列号块的版本
+WEEK_COLUMN = 9  # I 列：每个序列号块的周期 / D/C
 IMAGE_ANCHOR_CELL = "C27"  # 测试图片插入位置
 IMAGE_HEIGHT_PIXELS = 250  # 图片按高度等比缩放
 IMAGE_JPEG_QUALITY = 100
@@ -173,32 +184,42 @@ HELP_DOCUMENT = (
     "  2. 数据路径：选择存放 EMI PDF 的文件夹。选好后窗口标题会跟随该文件夹名，\n"
     "     「序列号」区会自动列出文件名中「-」之前的序列号（去重），点击该区标签可刷新。\n"
     "  3. 负载数量：需与模板档数一致（程序以模板文件名中的数字为准）。\n"
-    "  4. 测试日期 / 工令 / 版本 / 周期：写入报告表头。\n"
-    "  5. 测试图片：可选，鼠标悬停在输入框上可预览。\n"
-    "  6. 测试细节：点「点击此处获取」从模板读取，也可手工修改。\n"
-    "  7. 点「开始」：解析 PDF → 写入 Excel → 按设置生成 / 嵌入压缩包 → 弹出完成提示。\n"
+    "  4. 测试日期 / 工令 / 版本 / 周期：作为默认值写入报告表头。\n"
+    "  5. 「按序列号填写工令 / 版本」表格：数据路径确定后自动列出各序列号，\n"
+    "     可给个别序列号单独填工令或版本，留空则用上面的默认值；\n"
+    "     写入时每个序列号都会填上自己的工令 / 版本 / 周期（不再依赖模板公式）。\n"
+    "  6. 测试图片：可选，鼠标悬停在输入框上可预览。\n"
+    "  7. 测试细节：点「点击此处获取」从模板读取，也可手工修改。\n"
+    "  8. 清空：清空除「模版路径」「测试细节」以外的输入（测试日期回到今天）。\n"
+    "  9. 开始：先做条件校验，再解析 PDF → 写入 Excel → 按设置生成 / 嵌入压缩包 → 完成提示。\n"
     "\n"
-    "三、数据完整性检查（写入后自动执行）\n"
+    "三、条件匹配校验（写入前自动执行）\n"
+    "  逐份检查源数据的电压 / 负载 / 相线能否在模板中找到对应行：\n"
+    "  · 例如模板是 10%、20%…100% 十档负载，而报告是 25%、50%、100% 时会被拦下，\n"
+    "    提示涉及的文件与模板支持的条件后中止本次写入；\n"
+    "  · 全部匹配才继续写入，避免表格写错位甚至卡住。\n"
+    "\n"
+    "四、数据完整性检查（写入后自动执行）\n"
     "  按 (电压, 负载, 相线) 逐个条件检查数据行：\n"
     "  · 某条件在所有序列号中都没有数据 → 视为未安排该测试：自动删除这些空行并提示；\n"
     "  · 只有部分序列号缺数据，或某行只写了一部分 → 视为异常：程序会检查对应报告文件\n"
     "    （缺失 / 存在但取不到数据）并警告，请补齐报告后重新运行。\n"
     "\n"
-    "四、设置（选项 → 设置，Ctrl+I）\n"
-    "  · 生成压缩包：把数据目录下的 PDF 打成 zip；\n"
-    "  · 嵌入压缩包：把 zip 作为对象插入 Excel 报告；\n"
-    "  · 执行完毕关闭 Excel：默认不关闭，便于继续编辑。\n"
+    "五、选项菜单\n"
+    "  · 设置（Ctrl+I）：生成压缩包 / 嵌入压缩包 / 执行完毕关闭 Excel；\n"
+    "  · 重启（Ctrl+R）：重启程序，输入内容与设置会保留，重启后自动恢复；\n"
+    "  · 退出：关闭程序（输入内容会自动保存）。\n"
     "\n"
-    "五、工具\n"
+    "六、工具\n"
     "  · docx转pdf（Ctrl+T）：选择目录或单个文件批量转 PDF，窗口会预览序列号与文件数量；\n"
     "  · word替换（Ctrl+G）：点「原字符串集」标签可从源路径文件名提取序列号，\n"
     "    点「目标字符串集」标签可把格式控制符整理为单个换行，随后按名称配对替换。\n"
     "\n"
-    "六、日志与状态\n"
+    "七、日志与状态\n"
     "  · 工具 → 查看日志（Ctrl+J）：可更新 / 清空 / 导出日志，出问题先看这里；\n"
     "  · 输入内容与设置会自动保存，程序异常退出后重开自动恢复。\n"
     "\n"
-    "七、输出与收尾\n"
+    "八、输出与收尾\n"
     "  · 报告与 zip 生成在「数据路径的上一级目录」，报告名为\n"
     "    2.1 Conducted EMI Measurement_{型号}.xlsx；\n"
     "  · 报告仍需人工补充：日期与测试者、限值标准（默认 Class B）、\n"
@@ -408,9 +429,12 @@ class EMIWindow(MainWindow):
         self.col_end_ = DEFAULT_ANCHORS["col_end_"]  # 数据结束列
 
         self.rootpath: str | None = None  # 上次使用的目录
+        self.startup_dir = os.getcwd()  # 启动时的工作目录（重启进程时沿用）
         self.file_count = 0
         self.settings_value = {item.key: item.default for item in SETTING_ITEMS}
         self.settings: dict[str, QCheckBox] = {}  # 设置窗口中的勾选框
+        # 按序列号覆盖的工令 / 版本：{序列号: (工令, 版本)}，留空表示用默认值
+        self.serial_overrides: dict[str, tuple[str, str]] = {}
         self.windows: list[QWidget] = []  # 已打开的窗口，退出时统一关闭
         self.log_path: str | None = os.path.join(os.getcwd(), LOG_FILENAME)
         self.save_file_name: str | None = None
@@ -435,12 +459,15 @@ class EMIWindow(MainWindow):
     def init_connect(self) -> None:
         self.btn_exit.clicked.connect(self.close)
         self.btn_start.clicked.connect(self.getpdfdatas)
+        self.btn_clear.clicked.connect(self.clear_inputs)
         self.btnfile_template.clicked.connect(self.select_templatepath)
         self.btnfile_model.clicked.connect(self.select_modelpath)
         self.btnfile_img.clicked.connect(self.select_imgpath)
         self.btn_getdetail.clicked.connect(self.get_testdetail)
         self.label_serial.clicked.connect(self.refresh_serial_numbers)
+        self.table_serial.itemChanged.connect(self._on_serial_table_changed)
         self.action_exit.triggered.connect(self.close)
+        self.action_restart.triggered.connect(self.restart_application)
         self.action_sets.triggered.connect(self.show_setting)
         self.action_about.triggered.connect(self.show_about)
         self.action_doc.triggered.connect(self.show_helpdoc)
@@ -475,7 +502,23 @@ class EMIWindow(MainWindow):
                     saved_settings.get(item.key, item.default)
                 )
 
+        saved_overrides = state.get(KEY_SERIAL_OVERRIDES, {})
+        if isinstance(saved_overrides, dict):
+            self.serial_overrides = {
+                str(serial): self._as_pair(value)
+                for serial, value in saved_overrides.items()
+            }
+
         logger.info("界面状态已恢复: %s", self.app_state.path)
+
+    @staticmethod
+    def _as_pair(value: Any) -> tuple[str, str]:
+        """把状态里存的 [工令, 版本] 还原成二元组。"""
+        if isinstance(value, (list, tuple)):
+            parts = [str(item) if item is not None else "" for item in value]
+            parts += [""] * (2 - len(parts))
+            return parts[0], parts[1]
+        return "", ""
 
     @staticmethod
     def _as_int(value: Any, default: int) -> int:
@@ -498,6 +541,10 @@ class EMIWindow(MainWindow):
                 KEY_TEST_DETAIL: self.text_detail.toPlainText(),
                 KEY_TEST_DATE: self.date_test.date().toString(Qt.ISODate),
                 KEY_SETTINGS: dict(self.settings_value),
+                KEY_SERIAL_OVERRIDES: {
+                    serial: list(values)
+                    for serial, values in self.serial_overrides.items()
+                },
             }
         )
 
@@ -522,6 +569,45 @@ class EMIWindow(MainWindow):
 
     # ---- 序列号 ---------------------------------------------------------- #
 
+    def clear_inputs(self) -> None:
+        """清空除「模版路径」「测试细节」以外的输入内容。"""
+        self.lineEdit_model.clear()
+        self.spin_qty.setValue(DEFAULT_LOAD_QTY)
+        self.lineEdit_week.clear()
+        self.lineEdit_rev.clear()
+        self.lineEdit_workerno.clear()
+        self.lineEdit_img.clear()
+        self.date_test.setDate(QDate.currentDate())
+        self.save_state()
+        self.refresh_serial_numbers()
+        logger.info("已清空输入内容（保留了模版路径与测试细节）。")
+
+    def restart_application(self) -> None:
+        """重启程序；当前输入与设置已持久化，重启后会自动恢复。"""
+        self.save_state()
+        program = sys.executable
+        if getattr(sys, "frozen", False):
+            arguments = list(sys.argv[1:])
+        else:
+            arguments = [os.path.abspath(__file__), *sys.argv[1:]]
+
+        started = QProcess.startDetached(program, arguments, self.startup_dir)
+        if isinstance(started, tuple):  # 部分 PySide6 版本返回 (bool, pid)
+            started = started[0]
+        logger.info(
+            "重启程序: %s %s（工作目录 %s）-> %s",
+            program,
+            arguments,
+            self.startup_dir,
+            started,
+        )
+        if not started:
+            QMessageBox.warning(
+                self, "重启失败", "无法启动新的程序实例，请手动关闭后重新打开。"
+            )
+            return
+        self.close()
+
     def bind_serial_tracking(self) -> None:
         """数据路径变化后延迟刷新序列号显示。"""
         self.lineEdit_model.textChanged.connect(self._schedule_serial_refresh)
@@ -534,11 +620,74 @@ class EMIWindow(MainWindow):
         directory = self.lineEdit_model.text().strip()
         serials = collect_name_tokens(directory, REPORT_FILE_SUFFIX)
         self.text_serial.setPlainText("\n".join(serials))
+        self.sync_serial_table(serials)
         if serials:
             logger.info("序列号刷新: %d 个（%s）", len(serials), directory)
         else:
             logger.debug("序列号刷新: 未提取到序列号（%s）", directory)
         self.update_window_title()
+
+    def sync_serial_table(self, serials: list[str]) -> None:
+        """让「按序列号填写」表格与序列号列表保持一致（保留已填内容）。"""
+        table = self.table_serial
+        table.blockSignals(True)
+        table.setRowCount(len(serials))
+        for row, serial in enumerate(serials):
+            table.setVerticalHeaderItem(row, QTableWidgetItem(serial))
+            workno, revision = self.serial_overrides.get(serial, ("", ""))
+            table.setItem(row, 0, QTableWidgetItem(workno))
+            table.setItem(row, 1, QTableWidgetItem(revision))
+        table.blockSignals(False)
+
+    def _on_serial_table_changed(self, item: QTableWidgetItem) -> None:
+        """表格内容变化时记录到序列号覆盖表，并触发状态保存。"""
+        header_item = self.table_serial.verticalHeaderItem(item.row())
+        serial = header_item.text() if header_item is not None else ""
+        if not serial:
+            return
+
+        workno = self._cell_text(item.row(), 0)
+        revision = self._cell_text(item.row(), 1)
+        if workno or revision:
+            self.serial_overrides[serial] = (workno, revision)
+        else:
+            self.serial_overrides.pop(serial, None)
+        self._schedule_state_save()
+
+    def _cell_text(self, row: int, column: int) -> str:
+        item = self.table_serial.item(row, column)
+        return item.text().strip() if item is not None else ""
+
+    def _serial_values(self, serial: str) -> tuple[str, str]:
+        """取某序列号的 (工令, 版本)：表格里留空则用「补充信息」中的默认值。"""
+        workno, revision = self.serial_overrides.get(serial, ("", ""))
+        return (
+            workno or self.lineEdit_workerno.text(),
+            revision or self.lineEdit_rev.text(),
+        )
+
+    def _write_serial_headers(self, sheet) -> None:
+        """按序列号块逐个写入工令 / 版本 / 周期，覆盖模板里的链式公式。"""
+        week = self.lineEdit_week.text()
+        count = 0
+        for row in range(self.row_sn_, self.row_end_ + 1):
+            serial = sheet.cell(row=row, column=self.col_sn_).value
+            if serial is None:
+                continue
+            workno, revision = self._serial_values(str(serial))
+            sheet.cell(row=row, column=WORKNO_COLUMN).value = workno
+            sheet.cell(row=row, column=REV_COLUMN).value = revision
+            sheet.cell(row=row, column=WEEK_COLUMN).value = week
+            count += 1
+            logger.debug(
+                "序列号 %s（第 %d 行）: 工令=%s, 版本=%s, 周期=%s",
+                serial,
+                row,
+                workno,
+                revision,
+                week,
+            )
+        logger.info("按序列号写入工令/版本/周期: 共 %d 个序列号", count)
 
     def update_window_title(self) -> None:
         """窗口标题跟随数据路径最后一级文件夹名称。"""
@@ -1003,9 +1152,21 @@ class EMIWindow(MainWindow):
             )
             return
 
+        problems = self._validate_report_conditions(sheet, report_data, load_qty)
+        if problems:
+            logger.error("源数据与模板条件不匹配，已中止写入: %s", problems)
+            QMessageBox.critical(
+                self,
+                self.tr("条件不匹配"),
+                "源数据与模板的测试条件对不上，已中止写入"
+                "（避免表格错乱或程序卡住）：\n" + self._format_notice(problems),
+            )
+            return
+
         self._resize_report_rows(sheet, load_qty, uut_count)
         self._write_measurements(sheet, report_data, load_qty)
         self._check_measurement_gaps(sheet, load_qty, uut_count, model_dir_name)
+        self._write_serial_headers(sheet)
 
         save_file = re.sub(
             TEMPLATE_COUNT_PATTERN, f"_{uut_name}.xlsx", os.path.basename(template_file)
@@ -1030,29 +1191,23 @@ class EMIWindow(MainWindow):
                 )
 
     def _write_header(self, sheet, model_dir_name: str) -> str:
-        """写入表头信息，返回单体型号名。"""
+        """写入全局表头（型号 / 日期 / 测试细节），返回单体型号名。
+
+        工令 / 版本 / 周期是按序列号块分别写入的，见 :meth:`_write_serial_headers`。
+        """
         parts = model_dir_name.split("-")
         uut_name = "-".join(parts[:2]) if len(parts) > 1 else model_dir_name
         test_date = self.date_test.date().toString("yyyy/MM/dd")
-        workno = self.lineEdit_workerno.text()
-        revision = self.lineEdit_rev.text()
-        week = self.lineEdit_week.text()
         detail = self.text_detail.toPlainText()
 
         sheet[HEADER_CELL_MODEL] = uut_name
         sheet[HEADER_CELL_DATE] = test_date
-        sheet[HEADER_CELL_WORKNO] = workno
-        sheet[HEADER_CELL_REV] = revision
-        sheet[HEADER_CELL_WEEK] = week
         sheet[HEADER_CELL_DETAIL] = detail
 
         logger.info(
-            "表头写入: 型号=%s, 日期=%s, 工令=%s, 版本=%s, 周期=%s, 测试细节 %d 字符",
+            "表头写入: 型号=%s, 日期=%s, 测试细节 %d 字符",
             uut_name,
             test_date,
-            workno,
-            revision,
-            week,
             len(detail),
         )
         return uut_name
@@ -1121,11 +1276,20 @@ class EMIWindow(MainWindow):
         """逐份报告定位到对应行并写入测量数据。"""
         for datas in report_data.values():
             row_sn = self.row_sn_
+            # 模板最多容纳 MAX_UUT_COUNT 个机种块，限制搜索范围避免死循环
+            max_row = self.row_sn_ + load_qty * ROWS_PER_UUT_UNIT * MAX_UUT_COUNT
             while (
-                sheet.cell(row=row_sn, column=self.col_sn_).value is not None
+                row_sn < max_row
+                and sheet.cell(row=row_sn, column=self.col_sn_).value is not None
                 and sheet.cell(row=row_sn, column=self.col_sn_).value != datas["Serial"]
             ):
                 row_sn += load_qty * ROWS_PER_UUT_UNIT
+            if row_sn >= max_row:
+                logger.error(
+                    "序列号 %s 在模板中找不到可用行，已跳过该报告。",
+                    datas.get("Serial"),
+                )
+                continue
             if sheet.cell(row=row_sn, column=self.col_sn_).value is None:
                 sheet.cell(row=row_sn, column=self.col_sn_).value = datas["Serial"]
 
@@ -1170,6 +1334,89 @@ class EMIWindow(MainWindow):
             )
 
         logger.info("测量数据写入完成: 共 %d 份", len(report_data))
+
+    # ---- 条件匹配校验 ---------------------------------------------------- #
+
+    def _collect_template_conditions(
+        self, sheet, load_qty: int
+    ) -> dict[int, dict[int, set[str]]]:
+        """收集模板第一个机种块中可用的条件：``{电压值: {负载百分数: {相线名}}}``。"""
+        conditions: dict[int, dict[int, set[str]]] = {}
+        for vol_index in range(VOLTAGE_KINDS):
+            vol_row = self.row_sn_ + vol_index * load_qty * ROWS_PER_LOAD_STEP
+            voltage = sheet.cell(row=vol_row, column=self.col_vol_).value
+            if voltage is None:
+                continue
+
+            loads: dict[int, set[str]] = {}
+            for load_index in range(load_qty):
+                load_row = vol_row + load_index * ROWS_PER_LOAD_STEP
+                load_value = sheet.cell(row=load_row, column=self.col_load_).value
+                if load_value is None:
+                    continue
+                phase_names = {
+                    str(sheet.cell(row=load_row + offset, column=self.col_line_).value)
+                    for offset in range(PHASE_KINDS)
+                }
+                loads[int(round(float(load_value) * 100))] = phase_names
+            conditions[int(float(voltage))] = loads
+        return conditions
+
+    def _validate_report_conditions(
+        self, sheet, report_data: dict[str, dict[str, Any]], load_qty: int
+    ) -> list[str]:
+        """校验源数据的 (电压, 负载, 相线) 条件能否在模板中匹配。
+
+        :return: 问题描述列表；为空列表表示全部匹配
+        """
+        template_conditions = self._collect_template_conditions(sheet, load_qty)
+        voltage_text = "、".join(f"{value}V" for value in sorted(template_conditions))
+        problems: list[str] = []
+
+        for file_name, datas in report_data.items():
+            power_match = re.match(r"\d+", str(datas.get("Power", "")))
+            load_match = re.match(r"\d+", str(datas.get("Load", "")))
+            rows = datas.get("datas") or []
+            if not power_match or not load_match or not rows:
+                problems.append(
+                    f"{file_name}：电压/负载信息无法识别"
+                    f"（Power={datas.get('Power')}, Load={datas.get('Load')}）"
+                )
+                continue
+
+            voltage_value = int(power_match.group())
+            load_percent = int(load_match.group())
+            raw_phase = str(rows[0][PDF_LINE_COLUMN])
+            phase_name = LINE_LABELS.get(raw_phase, "")
+            if not phase_name:
+                problems.append(f"{file_name}：相线标识无法识别（{raw_phase}）")
+                continue
+
+            loads = template_conditions.get(voltage_value)
+            if loads is None:
+                problems.append(
+                    f"{file_name}：电压 {voltage_value}V 在模板中不存在"
+                    f"（模板电压：{voltage_text}）"
+                )
+                continue
+
+            phase_names = loads.get(load_percent)
+            if phase_names is None:
+                loads_text = "、".join(f"{value}%" for value in sorted(loads))
+                problems.append(
+                    f"{file_name}：负载 {load_percent}% 在模板中不存在"
+                    f"（{voltage_value}V 下模板支持：{loads_text}）"
+                )
+                continue
+
+            if phase_name not in phase_names:
+                problems.append(
+                    f"{file_name}：相线 {phase_name} 在模板中不存在"
+                    f"（{voltage_value}V/{load_percent}% 下模板支持："
+                    f"{'、'.join(sorted(phase_names))}）"
+                )
+
+        return problems
 
     # ---- 数据完整性检查 -------------------------------------------------- #
 
@@ -1303,6 +1550,79 @@ class EMIWindow(MainWindow):
                 # 该区域的单元格已随删行消失，合并记录已移除即可
                 logger.debug("跳过已失效的合并区域: %s", coord)
 
+    def _collect_block_merges(
+        self, sheet, block_rows: int
+    ) -> list[tuple[int, int, int, int]]:
+        """记录模板第一个块内的合并模式：(起始偏移, 结束偏移, 起始列, 结束列)。"""
+        block_start = self.row_sn_
+        patterns: list[tuple[int, int, int, int]] = []
+        for cell_range in sheet.merged_cells:
+            if block_start <= cell_range.min_row < block_start + block_rows:
+                patterns.append(
+                    (
+                        cell_range.min_row - block_start,
+                        cell_range.max_row - block_start,
+                        cell_range.min_col,
+                        cell_range.max_col,
+                    )
+                )
+        return patterns
+
+    def _rebuild_block_merges(
+        self,
+        sheet,
+        patterns: list[tuple[int, int, int, int]],
+        kept_offsets: list[int],
+        uut_count: int,
+        new_block_rows: int,
+    ) -> None:
+        """删行后按新的块结构重建合并区域。
+
+        块内的合并区域（序号、序列号、工令、版本、周期、电压段、负载档）在删行后
+        会与新行号错位，这里按"保留下来的原始行"重新合并。
+        """
+        if new_block_rows <= 0:
+            logger.warning("新的块行数异常(%s)，跳过合并区域重建。", new_block_rows)
+            return
+
+        # 先解除数据区内已错位的合并（数据列不在这些合并区内，不会伤到数据）
+        for coord in [
+            rng.coord
+            for rng in sheet.merged_cells
+            if rng.max_row >= self.row_sn_ and rng.min_row <= self.row_end_
+        ]:
+            try:
+                sheet.unmerge_cells(coord)
+            except KeyError:
+                logger.debug("跳过已失效的合并区域: %s", coord)
+
+        position_of = {offset: index for index, offset in enumerate(kept_offsets)}
+        for index in range(uut_count):
+            base_row = self.row_sn_ + index * new_block_rows
+            for start_offset, end_offset, min_col, max_col in patterns:
+                kept = [
+                    offset
+                    for offset in range(start_offset, end_offset + 1)
+                    if offset in position_of
+                ]
+                if not kept:
+                    continue
+                try:
+                    sheet.merge_cells(
+                        start_row=base_row + position_of[kept[0]],
+                        start_column=min_col,
+                        end_row=base_row + position_of[kept[-1]],
+                        end_column=max_col,
+                    )
+                except Exception:
+                    logger.exception(
+                        "重建合并区域失败: 列 %s-%s, 第 %s 个序列号",
+                        min_col,
+                        max_col,
+                        index + 1,
+                    )
+        logger.info("已按新的块结构重建合并区域: %d 个序列号", uut_count)
+
     def _check_measurement_gaps(
         self, sheet, load_qty: int, uut_count: int, model_dir: str
     ) -> None:
@@ -1335,7 +1655,17 @@ class EMIWindow(MainWindow):
                 continue
             elif len(empty_serials) == len(states):
                 normal_conditions.append(condition_text)
-                removable_rows.extend(rows_by_serial.values())
+                for serial, row in rows_by_serial.items():
+                    if sheet.cell(row=row, column=self.col_sn_).value is not None:
+                        # 该行承载序列号（块首行），删除会破坏表格结构，保留
+                        logger.debug(
+                            "条件 %s 第 %d 行承载序列号 %s，保留不删。",
+                            condition_text,
+                            row,
+                            serial,
+                        )
+                        continue
+                    removable_rows.append(row)
             else:
                 for serial in empty_serials:
                     reason = self._diagnose_missing_report(
@@ -1354,13 +1684,48 @@ class EMIWindow(MainWindow):
             logger.warning("数据缺失: %s", item)
 
         if removable_rows:
+            # 删行会移动单元格，但合并区域不会跟着平移：先记录模板块内的合并模式，
+            # 删行后再按保留下来的行重建，避免序列号 / 工令的合并区跨到别的块上。
+            block_rows = load_qty * ROWS_PER_UUT_UNIT
+            block_start = self.row_sn_
+            patterns = self._collect_block_merges(sheet, block_rows)
+            removed_offsets = {
+                row - block_start
+                for row in removable_rows
+                if block_start <= row < block_start + block_rows
+            }
+            kept_offsets = [
+                offset for offset in range(block_rows) if offset not in removed_offsets
+            ]
+
             for row in sorted(removable_rows, reverse=True):
                 sheet.delete_rows(row, 1)
             self.row_end_ = sheet.max_row - REPORT_TAIL_ROWS
+
+            new_block_rows = len(kept_offsets)
+            serials = [
+                sheet.cell(
+                    row=self.row_sn_ + index * new_block_rows, column=self.col_sn_
+                ).value
+                for index in range(uut_count)
+            ]
+
+            self._rebuild_block_merges(
+                sheet, patterns, kept_offsets, uut_count, new_block_rows
+            )
+            # 重建合并会清掉合并区内非左上角的单元格，序列号需要写回块首行
+            for index, serial in enumerate(serials):
+                if serial:
+                    sheet.cell(
+                        row=self.row_sn_ + index * new_block_rows,
+                        column=self.col_sn_,
+                    ).value = serial
+
             self._cleanup_orphan_merges(sheet)
             logger.info(
-                "已删除 %d 个空条件行，数据结束行更新为 %s",
+                "已删除 %d 个空条件行（每个序列号 %d 行），数据结束行更新为 %s",
                 len(removable_rows),
+                len(removed_offsets),
                 self.row_end_,
             )
 

@@ -3,7 +3,7 @@
 EMI 传导骚扰（Conducted EMI）测试报告自动化工具：把 ELEKTRA 导出的 EMI PDF 报告解析成数据，按模板写入 Excel，并生成 / 嵌入原始 PDF 压缩包，产出一份可直接继续整理的报告底稿。界面基于 PySide6（QMainWindow + QThread）。
 
 - 主入口：[src/EMI-Report.py](src/EMI-Report.py)，窗口标题 `EMI-Report`
-- 版本：`2.1`（显示在「帮助 → 关于」窗口），变更历史见 [CHANGELOG.md](CHANGELOG.md)
+- 版本：`2.2`（显示在「帮助 → 关于」窗口），变更历史见 [CHANGELOG.md](CHANGELOG.md)
 - 作者：`Lucas Li`（Lucas_Li@acbel.com）
 - 面向使用者的说明：[使用须知/使用须知.md](使用须知/使用须知.md)
 - 远程仓库：https://github.com/yooxii/EMI_deal.git
@@ -16,9 +16,9 @@ EMI 传导骚扰（Conducted EMI）测试报告自动化工具：把 ELEKTRA 导
 | --- | --- |
 | 远程 | `https://github.com/yooxii/EMI_deal.git`（origin） |
 | 当前分支 | `master` |
-| 当前提交 | `2.1` 版本提交（此前基线为 `c1dc25e`，2026-01-06） |
-| 与远程关系 | `2.1` 版本提交后与 `origin/master` 同步 |
-| 提交总数 | 14（含 `2.0` / `2.1` 版本提交） |
+| 当前提交 | `2.2` 版本提交（此前基线为 `c1dc25e`，2026-01-06） |
+| 与远程关系 | `2.2` 版本提交后与 `origin/master` 同步 |
+| 提交总数 | 15（含 `2.0` / `2.1` / `2.2` 版本提交） |
 | 工作区 | `2.0` 的改动已提交；`DealPdf.log` 被 `.gitignore` 忽略 |
 | 工作树 | 单一工作树 `E:/Desktop/Code/ORT/EMI_deal`，无 stash、无 tag |
 | 版本要求 | `.python-version` → `3.8`；`pyproject.toml` → `requires-python = ">=3.8"`；依赖由 `uv` 管理，索引为清华源 |
@@ -92,6 +92,7 @@ EMI_deal/
 | 日志视图 | `update_log`、`export_log`、`clear_log` |
 | 模板 | `open_template`（按负载数量拼模板名、缺失时弹选择框、返回 workbook）、`get_testdetail`（读 `Conducted EMI!F8` 作为测试细节） |
 | 主流程 | `main_func`（编排：`_write_header` / `_insert_test_image` / `_resize_report_rows` / `_write_measurements`，再保存并触发压缩）、`getpdfdatas`（起解析线程 + 状态栏进度条，`getpdf_running` 防重入）、`onProcessingFinished`、`onProcessingError`、`updateProgressBar` |
+| 条件校验 | `_collect_template_conditions`（收集模板可用的电压 / 负载 / 相线组合）、`_validate_report_conditions`（逐份比对，返回问题列表） |
 | 数据完整性 | `_collect_conditions`（枚举各 (电压, 负载, 相线) 条件对应的行）、`_row_state`（行填写状态）、`_check_measurement_gaps`（全序列号同缺则删行并提示，部分缺则告警）、`_diagnose_missing_report`（检查对应报告）、`_cleanup_orphan_merges`（清理残留合并区域） |
 | 压缩与嵌入 | `zip_folder`、`updateZipProgressBar`、`onZipFinished`、`onZipError`、`add_zip_to_excel`、`open_excel`（Excel COM 失败时循环询问是否重试） |
 
@@ -109,18 +110,19 @@ EMI_deal/
 | `lineEdit_model` + `btnfile_model` | 数据路径（含 EMI PDF 的机种文件夹） |
 | `text_serial` + `label_serial` | 序列号显示区（只读，位于「补充信息」上方）：取自数据路径下报告文件名「-」前第一段并去重；数据路径变化后自动刷新，点击标签立即刷新 |
 | `spin_qty` | 负载数量（QSpinBox，默认 3） |
-| `lineEdit_week` / `lineEdit_rev` / `lineEdit_workerno` | 周期（D/C）/ 版本 / 工令 |
+| `lineEdit_week` / `lineEdit_rev` / `lineEdit_workerno` | 周期（D/C）/ 版本 / 工令（作为默认值） |
+| `table_serial` | 「按序列号填写工令 / 版本」表格：行标题为序列号（随数据路径自动刷新，可滚动），工令 / 版本留空则用上面的默认值 |
 | `date_test` | 测试日期（QDateEdit，默认当天，弹出日历） |
 | `lineEdit_img` + `btnfile_img` | 测试图片路径（`HoverLineEdit`，可悬停预览） |
 | `text_detail` + `btn_getdetail` | 测试细节文本（点击“点击此处获取”从模板读出） |
-| `btn_start` / `btn_exit` | 开始 / 退出 |
+| `btn_start` / `btn_clear` / `btn_exit` | 开始 / 清空（清空除「模版路径」「测试细节」以外的输入）/ 退出 |
 | `statusBar_main` | 状态栏（进度条临时挂载于此） |
 
 菜单：
 
 | 菜单 | 动作（快捷键） |
 | --- | --- |
-| 选项 | 设置（Ctrl+I）、退出 |
+| 选项 | 设置（Ctrl+I）、重启（Ctrl+R）、退出 |
 | 工具 | 查看日志（Ctrl+J）、docx转pdf（Ctrl+T）、word替换（Ctrl+G） |
 | 帮助 | 使用文档、关于 |
 
@@ -200,7 +202,7 @@ EMI_deal/
 2. **选择路径**：`数据路径` 指向该机种文件夹，此时「序列号」区会自动列出该文件夹内报告文件名「-」之前的序列号（去重）；`模版路径` 可留空，留空时按 `负载数量` 自动使用 `template/2.1 Conducted EMI Measurement_{N}.xlsx`（现有 `_1` / `_3` / `_4` / `_10`），对应模板不存在时回落到 `_3` 并记 WARNING。写入时的行数换算以模板文件名中的数量为准，避免与模板行结构不符。
 3. **补充信息**：`点击此处获取` 从模板 `Conducted EMI!F8` 读出测试细节填入文本框；另外填写测试日期、工令、版本、周期（D/C），可选测试图片。
 4. **解析 PDF**（`ProcessPdfThread`）：逐份读取前两页文本 → 前 20 行中抓 `Serial` / `Power` / `Load` → 第 15 行之后取列数 > 10 的行作为数据行，并把每行第 1 列重编号为序号 → 分别按 AVG（第 8 列）与 PK（第 5 列）升序排序，取两者较小者所在的排序，用排序后的第 1 行作为该 PDF 的代表行。
-5. **写入 Excel**（`main_func`）：读取 `Setup` 表锚点 → 写表头 `F5` 单体型号（目录名前两段）、`F6` 测试日期、`F8` 测试细节、`F44` 工令、`H44` 版本、`I44` 周期 → 若图片存在，用 PIL 等比缩放到高 250 px 并转 JPEG，经 `openpyxl.drawing.image` 插入 `C27` → 按实际 UUT 数与负载数量反推需要删除的行数并 `delete_rows` → 按 Serial / 电压 / 负载 / 线性逐级定位，写入 7 列数据（第 5 列固定写 `-`）。
+5. **写入 Excel**（`main_func`）：先做**条件匹配校验**——逐份检查源数据的电压 / 负载 / 相线能否在模板中找到对应行（例如模板是 10%、20%…100% 十档，而报告是 25%、50%、100%），不匹配时列出具体文件与模板支持的条件并**中止本次写入**，避免表格错位甚至卡住；通过后读取 `Setup` 表锚点 → 写全局表头 `F5` 单体型号（目录名前两段）、`F6` 测试日期、`F8` 测试细节 → 若图片存在，用 PIL 等比缩放到高 250 px 并转 JPEG，经 `openpyxl.drawing.image` 插入 `C27` → 按实际 UUT 数与负载数量反推需要删除的行数并 `delete_rows` → 按 Serial / 电压 / 负载 / 线性逐级定位，写入 7 列数据（第 5 列固定写 `-`）→ 最后给**每个序列号块**写工令（F 列）、版本（H 列）、周期（I 列）：工令 / 版本可来自「按序列号填写」表格，留空则用界面默认值，从而覆盖模板里的链式公式。
 6. **数据完整性检查**（`_check_measurement_gaps`）：写入完成后逐个检查 (电压, 负载, 相线) 条件在**所有序列号**中对应数据行的填写情况——
    - 某条件在所有序列号中都没有数据：视为未安排该测试的正常情况，删除这些空行并给出提示；
    - 只有部分序列号缺数据、或某行只写了一部分列：视为异常，检查数据目录里对应报告文件的情况（报告缺失 / 报告存在但未能取到数据）并给出警告。
@@ -253,6 +255,7 @@ EMI_deal/
 | 序列号 | 数据路径变化或点击标签刷新后，记录提取到的序列号数量与来源目录（无结果时记 DEBUG） |
 | 模板 | 选中模板路径、模板缺失或打开失败的 WARNING / 异常 |
 | 报告写入 | 生成参数（目录 / 模板 / 负载数量 / 报告份数 / 设置开关）、表头各字段实际值、未选图片或图片缺失或插入失败、行调整明细（机种数 / 删除范围 / 数据结束行）、逐份定位结果（DEBUG）、写入汇总、保存路径与总用时 |
+| 条件校验 | 源数据的 (电压, 负载, 相线) 与模板不匹配时的具体文件与模板可用条件（ERROR，随后中止本次写入） |
 | 数据完整性 | 全序列号同缺的条件（INFO，含删除行数与新的数据结束行）、部分序列号缺数据或数据不完整的条件及其报告诊断结果（WARNING） |
 | 压缩与嵌入 | 压缩文件数、输出包名与压缩包大小、取消工作表保护、嵌入完成、按设置关闭 Excel |
 | 子窗口 | 窗口初始化、选择的目录 / 文件、启动参数、逐份替换明细（DEBUG）、转换与替换汇总（成功 / 失败） |
