@@ -36,6 +36,7 @@ KEY_TEST_DETAIL = "test_detail"
 KEY_TEST_DATE = "test_date"
 KEY_SETTINGS = "settings"
 KEY_SERIAL_OVERRIDES = "serial_overrides"  # {序列号: [工令, 版本]}
+KEY_DIFF_WORKNO = "diff_workno"  # 是否勾选「工令不同」（展开按序列号填写表格）
 
 
 def state_directory() -> str:

@@ -3,7 +3,7 @@
 EMI 传导骚扰（Conducted EMI）测试报告自动化工具：把 ELEKTRA 导出的 EMI PDF 报告解析成数据，按模板写入 Excel，并生成 / 嵌入原始 PDF 压缩包，产出一份可直接继续整理的报告底稿。界面基于 PySide6（QMainWindow + QThread）。
 
 - 主入口：[src/EMI-Report.py](src/EMI-Report.py)，窗口标题 `EMI-Report`
-- 版本：`2.2`（显示在「帮助 → 关于」窗口），变更历史见 [CHANGELOG.md](CHANGELOG.md)
+- 版本：`2.2.1`（显示在「帮助 → 关于」窗口），变更历史见 [CHANGELOG.md](CHANGELOG.md)
 - 作者：`Lucas Li`（Lucas_Li@acbel.com）
 - 面向使用者的说明：[使用须知/使用须知.md](使用须知/使用须知.md)
 - 远程仓库：https://github.com/yooxii/EMI_deal.git
@@ -16,9 +16,9 @@ EMI 传导骚扰（Conducted EMI）测试报告自动化工具：把 ELEKTRA 导
 | --- | --- |
 | 远程 | `https://github.com/yooxii/EMI_deal.git`（origin） |
 | 当前分支 | `master` |
-| 当前提交 | `2.2` 版本提交（此前基线为 `c1dc25e`，2026-01-06） |
-| 与远程关系 | `2.2` 版本提交后与 `origin/master` 同步 |
-| 提交总数 | 15（含 `2.0` / `2.1` / `2.2` 版本提交） |
+| 当前提交 | `2.2.1` 版本提交（此前基线为 `c1dc25e`，2026-01-06） |
+| 与远程关系 | `2.2.1` 版本提交后与 `origin/master` 同步 |
+| 提交总数 | 16（含 `2.0` / `2.1` / `2.2` / `2.2.1` 版本提交） |
 | 工作区 | `2.0` 的改动已提交；`DealPdf.log` 被 `.gitignore` 忽略 |
 | 工作树 | 单一工作树 `E:/Desktop/Code/ORT/EMI_deal`，无 stash、无 tag |
 | 版本要求 | `.python-version` → `3.8`；`pyproject.toml` → `requires-python = ">=3.8"`；依赖由 `uv` 管理，索引为清华源 |
@@ -111,7 +111,8 @@ EMI_deal/
 | `text_serial` + `label_serial` | 序列号显示区（只读，位于「补充信息」上方）：取自数据路径下报告文件名「-」前第一段并去重；数据路径变化后自动刷新，点击标签立即刷新 |
 | `spin_qty` | 负载数量（QSpinBox，默认 3） |
 | `lineEdit_week` / `lineEdit_rev` / `lineEdit_workerno` | 周期（D/C）/ 版本 / 工令（作为默认值） |
-| `table_serial` | 「按序列号填写工令 / 版本」表格：行标题为序列号（随数据路径自动刷新，可滚动），工令 / 版本留空则用上面的默认值 |
+| `check_diff_workno` | 「工令不同」勾选框（在工令输入框右侧，默认不勾选）：勾选后展开下方表格，取消则收起并全部使用默认值 |
+| `table_serial` | 「按序列号填写工令 / 版本」表格（默认隐藏）：行标题为序列号（随数据路径自动刷新，可滚动），工令 / 版本留空则用上面的默认值 |
 | `date_test` | 测试日期（QDateEdit，默认当天，弹出日历） |
 | `lineEdit_img` + `btnfile_img` | 测试图片路径（`HoverLineEdit`，可悬停预览） |
 | `text_detail` + `btn_getdetail` | 测试细节文本（点击“点击此处获取”从模板读出） |

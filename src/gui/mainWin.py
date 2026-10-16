@@ -15,6 +15,7 @@ from PySide6.QtGui import QAction, QCursor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QDateEdit,
     QFrame,
     QGridLayout,
@@ -139,7 +140,10 @@ class MainWindow(QMainWindow):
         self._build_path_rows(input_layout)
         input_layout.addWidget(self._build_serial_box())
         input_layout.addWidget(self._build_info_box())
-        input_layout.addWidget(self._build_serial_table_box())
+        # 表格默认隐藏，由「工令不同」勾选框控制展开
+        self.serial_table_box = self._build_serial_table_box()
+        self.serial_table_box.setVisible(False)
+        input_layout.addWidget(self.serial_table_box)
         self._build_action_buttons(input_layout)
 
     def _build_serial_table_box(self) -> QGroupBox:
@@ -255,9 +259,16 @@ class MainWindow(QMainWindow):
         )
 
         self.lineEdit_workerno = QLineEdit()
-        info_layout.addLayout(
-            self._make_info_row(self.tr("工令："), self.lineEdit_workerno), 2, 2, 1, 2
+        workno_row = self._make_info_row(self.tr("工令："), self.lineEdit_workerno)
+        self.check_diff_workno = QCheckBox(self.tr("工令不同"))
+        self.check_diff_workno.setSizePolicy(
+            QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
         )
+        self.check_diff_workno.setToolTip(
+            self.tr("勾选后展开下方表格，可按序列号分别填写工令与版本。")
+        )
+        workno_row.addWidget(self.check_diff_workno)
+        info_layout.addLayout(workno_row, 2, 2, 1, 2)
 
         # 第三行：测试图片（悬停可预览）
         self.lineEdit_img = HoverLineEdit()

@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui.app_state import (
+    KEY_DIFF_WORKNO,
     KEY_IMAGE_PATH,
     KEY_LOAD_QTY,
     KEY_MODEL_PATH,
@@ -73,7 +74,7 @@ from naming import collect_name_tokens
 
 LOG_FILENAME = "EMIRper.log"
 APP_TITLE = "EMI-Report"  # 窗口标题前缀（后面跟随数据路径的文件夹名）
-APP_VERSION = "2.2"
+APP_VERSION = "2.2.1"
 STATE_SAVE_DELAY_MS = 300  # 输入变化后延迟落盘的防抖时间
 SERIAL_REFRESH_DELAY_MS = 500  # 数据路径变化后延迟刷新序列号的防抖时间
 REPORT_FILE_SUFFIX = ".pdf"  # 提取序列号时依据的报告文件后缀
@@ -185,8 +186,9 @@ HELP_DOCUMENT = (
     "     「序列号」区会自动列出文件名中「-」之前的序列号（去重），点击该区标签可刷新。\n"
     "  3. 负载数量：需与模板档数一致（程序以模板文件名中的数字为准）。\n"
     "  4. 测试日期 / 工令 / 版本 / 周期：作为默认值写入报告表头。\n"
-    "  5. 「按序列号填写工令 / 版本」表格：数据路径确定后自动列出各序列号，\n"
-    "     可给个别序列号单独填工令或版本，留空则用上面的默认值；\n"
+    "  5. 工令右侧的「工令不同」：勾选后在下方展开表格，行标题为各序列号，\n"
+    "     可给个别序列号单独填工令 / 版本，留空仍用上面的默认值；\n"
+    "     取消勾选则收起表格，全部序列号都用默认值。\n"
     "     写入时每个序列号都会填上自己的工令 / 版本 / 周期（不再依赖模板公式）。\n"
     "  6. 测试图片：可选，鼠标悬停在输入框上可预览。\n"
     "  7. 测试细节：点「点击此处获取」从模板读取，也可手工修改。\n"
@@ -466,6 +468,7 @@ class EMIWindow(MainWindow):
         self.btn_getdetail.clicked.connect(self.get_testdetail)
         self.label_serial.clicked.connect(self.refresh_serial_numbers)
         self.table_serial.itemChanged.connect(self._on_serial_table_changed)
+        self.check_diff_workno.toggled.connect(self._on_diff_workno_toggled)
         self.action_exit.triggered.connect(self.close)
         self.action_restart.triggered.connect(self.restart_application)
         self.action_sets.triggered.connect(self.show_setting)
@@ -509,6 +512,10 @@ class EMIWindow(MainWindow):
                 for serial, value in saved_overrides.items()
             }
 
+        diff_workno = bool(state.get(KEY_DIFF_WORKNO, False))
+        self.check_diff_workno.setChecked(diff_workno)
+        self.serial_table_box.setVisible(diff_workno)
+
         logger.info("界面状态已恢复: %s", self.app_state.path)
 
     @staticmethod
@@ -545,6 +552,7 @@ class EMIWindow(MainWindow):
                     serial: list(values)
                     for serial, values in self.serial_overrides.items()
                 },
+                KEY_DIFF_WORKNO: self.check_diff_workno.isChecked(),
             }
         )
 
@@ -578,6 +586,8 @@ class EMIWindow(MainWindow):
         self.lineEdit_workerno.clear()
         self.lineEdit_img.clear()
         self.date_test.setDate(QDate.currentDate())
+        self.check_diff_workno.setChecked(False)
+        self.serial_overrides.clear()
         self.save_state()
         self.refresh_serial_numbers()
         logger.info("已清空输入内容（保留了模版路径与测试细节）。")
@@ -659,12 +669,26 @@ class EMIWindow(MainWindow):
         return item.text().strip() if item is not None else ""
 
     def _serial_values(self, serial: str) -> tuple[str, str]:
-        """取某序列号的 (工令, 版本)：表格里留空则用「补充信息」中的默认值。"""
+        """取某序列号的 (工令, 版本)。
+
+        未勾选「工令不同」时一律用界面上的默认值；勾选后表格里填了就用表格的值，
+        留空仍用默认值。
+        """
+        default_workno = self.lineEdit_workerno.text()
+        default_revision = self.lineEdit_rev.text()
+        if not self.check_diff_workno.isChecked():
+            return default_workno, default_revision
+
         workno, revision = self.serial_overrides.get(serial, ("", ""))
-        return (
-            workno or self.lineEdit_workerno.text(),
-            revision or self.lineEdit_rev.text(),
+        return workno or default_workno, revision or default_revision
+
+    def _on_diff_workno_toggled(self, checked: bool) -> None:
+        """「工令不同」勾选后展开按序列号填写的表格，取消勾选则收起。"""
+        self.serial_table_box.setVisible(checked)
+        logger.info(
+            "按序列号填写工令/版本: %s", "已展开" if checked else "已收起并改用默认值"
         )
+        self._schedule_state_save()
 
     def _write_serial_headers(self, sheet) -> None:
         """按序列号块逐个写入工令 / 版本 / 周期，覆盖模板里的链式公式。"""

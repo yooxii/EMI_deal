@@ -1,6 +1,6 @@
 [project]
 name = "pdf-deal"
-version = "2.2"
+version = "2.2.1"
 description = "EMI 报告自动化：PDF 报告解析 → Excel 模板写入 → 压缩包嵌入"
 readme = "README.md"
 requires-python = ">=3.8"
