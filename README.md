@@ -3,7 +3,7 @@
 EMI 传导骚扰（Conducted EMI）测试报告自动化工具：把 ELEKTRA 导出的 EMI PDF 报告解析成数据，按模板写入 Excel，并生成 / 嵌入原始 PDF 压缩包，产出一份可直接继续整理的报告底稿。界面基于 PySide6（QMainWindow + QThread）。
 
 - 主入口：[src/EMI-Report.py](src/EMI-Report.py)，窗口标题 `EMI-Report`
-- 版本：`2.2.1`（显示在「帮助 → 关于」窗口），变更历史见 [CHANGELOG.md](CHANGELOG.md)
+- 版本：`2.3`（显示在「帮助 → 关于」窗口），变更历史见 [CHANGELOG.md](CHANGELOG.md)
 - 作者：`Lucas Li`（Lucas_Li@acbel.com）
 - 面向使用者的说明：[使用须知/使用须知.md](使用须知/使用须知.md)
 - 远程仓库：https://github.com/yooxii/EMI_deal.git
@@ -16,7 +16,7 @@ EMI 传导骚扰（Conducted EMI）测试报告自动化工具：把 ELEKTRA 导
 | --- | --- |
 | 远程 | `https://github.com/yooxii/EMI_deal.git`（origin） |
 | 当前分支 | `master` |
-| 当前提交 | `2.2.1` 版本提交（此前基线为 `c1dc25e`，2026-01-06） |
+| 当前提交 | `2.3` 版本提交（新增无界面批处理入口 `src/batch.py`） |
 | 与远程关系 | `2.2.1` 版本提交后与 `origin/master` 同步 |
 | 提交总数 | 16（含 `2.0` / `2.1` / `2.2` / `2.2.1` 版本提交） |
 | 工作区 | `2.0` 的改动已提交；`DealPdf.log` 被 `.gitignore` 忽略 |
@@ -31,6 +31,7 @@ EMI 传导骚扰（Conducted EMI）测试报告自动化工具：把 ELEKTRA 导
 EMI_deal/
 ├─ src/
 │  ├─ EMI-Report.py                 # 主入口：EMIWindow 主窗口 + 2 个工作线程
+│  ├─ batch.py                      # 无界面批处理入口：离屏驱动同一套流程批量出报告
 │  ├─ logger.py                     # 日志基础设施：主日志 / 错误日志 / 装饰器
 │  ├─ naming.py                     # 从报告文件名提取名称片段（序列号等）
 │  ├─ docx2pdf.py                   # 命令行版 docx→pdf 脚本（与 GUI 版功能重叠）
@@ -177,12 +178,37 @@ EMI_deal/
 | [src/test_openpyxl.py](src/test_openpyxl.py) | 删除模板 `Setup` 前 4 行的试验 |
 | [deal_pdf.spec](deal_pdf.spec) | 旧打包配置，入口 `deal_pdf.py` 已不存在 |
 
+### 3.9 [src/batch.py](src/batch.py) — 无界面批处理入口
+
+不做界面交互，批量把 EMI PDF 生成报告；实现方式是**复用 GUI 逻辑**而不是另写一套：
+
+| 环节 | 做法 |
+| --- | --- |
+| 加载主程序 | 用 `importlib` 以模块名 `emi_report_main` 加载 `EMI-Report.py`（文件名含连字符，不能直接 `import`）；模块级 `setup_logging` 照常生效 |
+| 无界面 | `QT_QPA_PLATFORM=offscreen` + 创建一个不 `show()` 的 `EMIWindow`，把作业参数写进对应输入框（`lineEdit_model` / `lineEdit_template` / `spin_qty` / `lineEdit_week` / `lineEdit_rev` / `lineEdit_workerno` / `text_detail` / `date_test` / `lineEdit_img` / `settings_value`） |
+| 不弹窗 | 把主程序模块里的 `QMessageBox` 换成 `QuietMessageBox`（只记日志，`question` 一律返回 No），无人值守时不会被对话框卡住 |
+| 解析 PDF | 直接调用 `ProcessPdfThread(...).deal_dirs(dir)`（纯方法，不启动 QThread、不需要事件循环） |
+| 序列号过滤 | 作业给了 `serials` 时，只保留这些序列号的 PDF（数据目录里有别的序列号就复制到临时目录），并把机种块顺序按给定序列号排列 |
+| 写出与归档 | 调 `main_func` 后取 `save_file_name`，按 `out_dir` / `out_name` 归档；目标已有同名文件时先改名为 `*.bak-<时间戳>.xlsx` 再覆盖 |
+| 压缩与嵌入 | `zip` 时直接调 `ZipThread(...).zip_folder()`；`embed` 时调 `add_zip_to_excel`（需本机 Excel） |
+| 退出 | 输出落盘后 `os._exit(code)`：离屏 Qt 对象在解释器析构阶段会触发堆损坏（`0xC0000374`） |
+
 ## 4. 运行、调试与打包
 
 - 直接运行（**cwd 需在仓库根**，否则 `template/` 相对路径与自动选模板会失效）：
 
   ```powershell
   uv run src/EMI-Report.py
+  ```
+
+- 批处理（无界面，同样建议在仓库根执行）：
+
+  ```powershell
+  .\.venv\Scripts\python.exe src\batch.py --job jobs.json          # 作业清单
+  .\.venv\Scripts\python.exe src\batch.py --job jobs.json --dry-run  # 只检查数据与参数
+  .\.venv\Scripts\python.exe src\batch.py --data <机种目录> --week 2613 --rev A04 `
+      --workno AH00... --detail-file detail.txt --date 2026/04/20 `
+      --serials SN1 SN2 SN3 --out <Report 目录> --zip --embed
   ```
 
 - VS Code：任务 `uv run EMI-Report`（[.vscode/tasks.json](.vscode/tasks.json)，命令为 `uv run ${workspaceFolder}/src/EMI-Report.py`）；调试配置 [.vscode/launch.json](.vscode/launch.json) 只保留“调试当前文件”。
@@ -390,3 +416,59 @@ uv tool run ruff check --fix src     # 自动修复可修复项
 配套实现见 [src/naming.py](src/naming.py)（名称提取，主界面与 Word 替换共用）与 [src/gui/widgets.py](src/gui/widgets.py)（`ClickableLabel`）。
 
 **验证方式**：用临时目录构造 `SN1-220V-100%-L.pdf`、`SN1-220V-50%-N.pdf`、`SN2-110V-100%-L.pdf` 与 `note.txt`，序列号区得到 `SN1`、`SN2`（去重、忽略非 PDF）；同样的 docx 目录下点击「原字符串集」得到 `SN1`、`SN3`，改为单文件时为 `SN3`；`A1\r\n\r\n\tB2\n\n\n\n   C3` 整理后为 `A1\nB2\nC3`，`X\t\tY` 整理后为 `X\nY`。
+
+## 14. 批处理入口（2026-10-16，v2.3）
+
+面向「一次补齐多份报告」的场景：把每份报告的参数写进作业清单，由 `src/batch.py` 逐条跑完。
+
+### 14.1 作业文件
+
+```json
+{
+  "jobs": [
+    {
+      "data_dir": "D:\\...\\WorkDir\\FSF059-00CG",
+      "serials": ["FSF059A0400CGB2613002097", "FSF059A0400CGB2613002122", "FSF059A0400CGB2613002098"],
+      "template": "……\\template\\2.1 Conducted EMI Measurement_3.xlsx",
+      "load_qty": 3,
+      "week": "2613",
+      "rev": "A04",
+      "workno": "AH00F59B0041P01134",
+      "detail": "1. Test Condition:\n……\n\n2. Pass/Fail Criteria:\n……",
+      "test_date": "2026/04/20",
+      "image": "",
+      "out_dir": "D:\\...\\<报告文件夹>\\Report",
+      "out_name": "2.1 Conducted EMI Measurement.xlsx",
+      "zip": false,
+      "embed": false,
+      "backup_existing": true
+    }
+  ]
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `data_dir` | 必填，存放该机种 EMI PDF 的目录（GUI 里的「数据路径」） |
+| `serials` | 可选但建议填：只使用这些序列号的 PDF；不填则该目录下的 PDF 全部使用（超过模板 5 个机种块会失败） |
+| `template` | 可选，留空按 `load_qty` 取 `template/2.1 Conducted EMI Measurement_{N}.xlsx` |
+| `load_qty` | 可选，负载档数（默认 3）；实际行数换算以模板文件名里的数字为准 |
+| `week` / `rev` / `workno` | 周期（D/C）/ 版本 / 工令，按序列号块写入 F / H / I 列 |
+| `detail` | 测试描述，写入 `Conducted EMI!F8`；也可用 `detail_file` 指向文本文件 |
+| `test_date` | 测试日期 `YYYY/MM/DD`（默认今天），写入 `F6` |
+| `image` | 可选，测试图片路径（等比缩放到高 250 px 后插入 `C27`） |
+| `out_dir` / `out_name` | 报告归档目录与文件名；`out_name` 默认去掉模板名里的 `_<数量>` 后缀 |
+| `zip` / `embed` / `close_excel` | 是否生成 PDF 压缩包 / 嵌入 Excel / 嵌入后关闭 Excel（默认均否） |
+| `backup_existing` | 目标已有同名报告时是否先备份（默认 `true`） |
+
+### 14.2 输出与退出码
+
+每条作业打印一行 JSON：`{"index": 1, "ok": true, "model": "...", "reports": 36, "serials": [...], "out_file": "...", "backup_file": null, "zip_file": null, "seconds": 51.8}`；
+失败时为 `{"ok": false, "error": "..."}`。全部成功退出码为 0，任一作业失败为 1（其余作业仍会继续跑）。
+
+### 14.3 注意
+
+- 批处理同样会 `os.chdir` 到数据目录的上一级（沿用 GUI 行为），因此**每条作业的路径都写绝对路径**最稳妥。
+- 生成过程中 openpyxl 会丢弃模板里公式的缓存值（如 `M6` 的 `Pass`、`H6` 的日期、`F10` 的取样数），
+  用 Excel 打开时会重新计算，属预期现象。
+- 一次作业至少要解析 12 份 PDF（每序列号 2 电压 × 负载档数 × 2 相线），实测约 45~60 秒/份报告。
