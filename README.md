@@ -3,7 +3,7 @@
 EMI 传导骚扰（Conducted EMI）测试报告自动化工具：把 ELEKTRA 导出的 EMI PDF 报告解析成数据，按模板写入 Excel，并生成 / 嵌入原始 PDF 压缩包，产出一份可直接继续整理的报告底稿。界面基于 PySide6（QMainWindow + QThread）。
 
 - 主入口：[src/EMI-Report.py](src/EMI-Report.py)，窗口标题 `EMI-Report`
-- 版本：`2.3`（显示在「帮助 → 关于」窗口），变更历史见 [CHANGELOG.md](CHANGELOG.md)
+- 版本：`2.4`（显示在「帮助 → 关于」窗口），变更历史见 [CHANGELOG.md](CHANGELOG.md)
 - 作者：`Lucas Li`（Lucas_Li@acbel.com）
 - 面向使用者的说明：[使用须知/使用须知.md](使用须知/使用须知.md)
 - 远程仓库：https://github.com/yooxii/EMI_deal.git
@@ -16,7 +16,7 @@ EMI 传导骚扰（Conducted EMI）测试报告自动化工具：把 ELEKTRA 导
 | --- | --- |
 | 远程 | `https://github.com/yooxii/EMI_deal.git`（origin） |
 | 当前分支 | `master` |
-| 当前提交 | `2.3` 版本提交（新增无界面批处理入口 `src/batch.py`） |
+| 当前提交 | `2.4` 版本提交（批处理补充压缩包嵌入与 docx→pdf 自动转换） |
 | 与远程关系 | `2.2.1` 版本提交后与 `origin/master` 同步 |
 | 提交总数 | 16（含 `2.0` / `2.1` / `2.2` / `2.2.1` 版本提交） |
 | 工作区 | `2.0` 的改动已提交；`DealPdf.log` 被 `.gitignore` 忽略 |
@@ -190,7 +190,8 @@ EMI_deal/
 | 解析 PDF | 直接调用 `ProcessPdfThread(...).deal_dirs(dir)`（纯方法，不启动 QThread、不需要事件循环） |
 | 序列号过滤 | 作业给了 `serials` 时，只保留这些序列号的 PDF（数据目录里有别的序列号就复制到临时目录），并把机种块顺序按给定序列号排列 |
 | 写出与归档 | 调 `main_func` 后取 `save_file_name`，按 `out_dir` / `out_name` 归档；目标已有同名文件时先改名为 `*.bak-<时间戳>.xlsx` 再覆盖 |
-| 压缩与嵌入 | `zip` 时直接调 `ZipThread(...).zip_folder()`；`embed` 时调 `add_zip_to_excel`（需本机 Excel） |
+| 压缩与嵌入 | `zip` 时同步调 `ZipThread(...).zip_folder()`；`embed` 时调 `add_zip_to_excel(..., close_workbook=True, visible=False)`（需本机 Excel，嵌入后立即关闭本次打开的工作簿、不单独保留压缩包） |
+| 补数据 | 数据目录里只有 docx 没有 PDF 时，用 `docx2pdf.convert_docx_files()` 单线程转换（只转作业关心的序列号，且不关掉用户已打开的 Word 文档） |
 | 退出 | 输出落盘后 `os._exit(code)`：离屏 Qt 对象在解释器析构阶段会触发堆损坏（`0xC0000374`） |
 
 ## 4. 运行、调试与打包
@@ -458,8 +459,9 @@ uv tool run ruff check --fix src     # 自动修复可修复项
 | `test_date` | 测试日期 `YYYY/MM/DD`（默认今天），写入 `F6` |
 | `image` | 可选，测试图片路径（等比缩放到高 250 px 后插入 `C27`） |
 | `out_dir` / `out_name` | 报告归档目录与文件名；`out_name` 默认去掉模板名里的 `_<数量>` 后缀 |
-| `zip` / `embed` / `close_excel` | 是否生成 PDF 压缩包 / 嵌入 Excel / 嵌入后关闭 Excel（默认均否） |
-| `backup_existing` | 目标已有同名报告时是否先备份（默认 `true`） |
+| `zip` / `embed` / `close_excel` | 是否生成 PDF 压缩包 / 嵌入 Excel / 嵌入后关闭 Excel（默认均否）。`embed` 时批处理只关闭自己打开的工作簿，嵌入完成后不再单独保留压缩包 |
+| `docx2pdf` | 数据目录里只有 docx、没有对应 PDF 时，是否先用本机 Word 转出 PDF（默认 `true`，单线程） |
+| `backup_existing` | 目标已有同名报告时是否先备份（默认 `true`；改为 `false` 即直接替换） |
 
 ### 14.2 输出与退出码
 
@@ -471,4 +473,8 @@ uv tool run ruff check --fix src     # 自动修复可修复项
 - 批处理同样会 `os.chdir` 到数据目录的上一级（沿用 GUI 行为），因此**每条作业的路径都写绝对路径**最稳妥。
 - 生成过程中 openpyxl 会丢弃模板里公式的缓存值（如 `M6` 的 `Pass`、`H6` 的日期、`F10` 的取样数），
   用 Excel 打开时会重新计算，属预期现象。
-- 一次作业至少要解析 12 份 PDF（每序列号 2 电压 × 负载档数 × 2 相线），实测约 45~60 秒/份报告。
+- 一次作业至少要解析 12 份 PDF（每序列号 2 电压 × 负载档数 × 2 相线），实测约 30~60 秒/份；
+  需要 `docx2pdf` 时再加 1~2 分钟（36~48 份 Word 转换），`embed` 会在本机 Excel 里插入 OLE 对象。
+- 报告里的序列号取自 **PDF 内容**的 `Serial` 字段（与 GUI 一致），不是文件名。若源文档里的
+  序列号与报告概览的 Waterfall 不一致（例如多出一个字符），生成结果会照抄源文档，需要先用
+  Word 替换工具修正源数据。

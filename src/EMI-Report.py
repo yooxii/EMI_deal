@@ -74,7 +74,7 @@ from naming import collect_name_tokens
 
 LOG_FILENAME = "EMIRper.log"
 APP_TITLE = "EMI-Report"  # 窗口标题前缀（后面跟随数据路径的文件夹名）
-APP_VERSION = "2.3"
+APP_VERSION = "2.4"
 STATE_SAVE_DELAY_MS = 300  # 输入变化后延迟落盘的防抖时间
 SERIAL_REFRESH_DELAY_MS = 500  # 数据路径变化后延迟刷新序列号的防抖时间
 REPORT_FILE_SUFFIX = ".pdf"  # 提取序列号时依据的报告文件后缀
@@ -1886,7 +1886,7 @@ class EMIWindow(MainWindow):
             self.zip_progressBar = None
         QMessageBox.critical(self, "Error", f"Error zipping folder: {error_msg}")
 
-    def open_excel(self):
+    def open_excel(self, visible: bool = True):
         """取得 Excel COM 对象；创建失败时询问用户是否重试（放弃则返回 None）。"""
         while True:
             try:
@@ -1906,16 +1906,23 @@ class EMIWindow(MainWindow):
                     logger.warning("用户放弃启动 Excel，跳过压缩包嵌入。")
                     return None
                 continue
-            excel.Visible = True
+            excel.Visible = visible
             logger.debug("Excel 已启动。")
             return excel
 
-    def add_zip_to_excel(self, zipname: str, save_file: str) -> None:
-        """把压缩包作为 OLE 对象嵌入报告的最后一页并补齐边框。"""
-        excel = self.open_excel()
+    def add_zip_to_excel(
+        self, zipname: str, save_file: str, close_workbook: bool = False, visible: bool = True
+    ) -> None:
+        """把压缩包作为 OLE 对象嵌入报告的最后一页并补齐边框。
+
+        ``close_workbook`` 供批处理使用：嵌入后立即关闭该工作簿，释放文件占用，
+        以便把报告移动到目标目录；GUI 仍保持默认（保留 Excel 供人工查看）。
+        """
+        excel = self.open_excel(visible=visible)
         if excel is None:
             return
         logger.info("开始嵌入压缩包: %s.zip -> %s", zipname, save_file)
+        workbook = None
         try:
             workbook = excel.Workbooks.Open(os.path.abspath(save_file))
             sheet = workbook.Worksheets(REPORT_SHEET_NAME)
@@ -1942,11 +1949,19 @@ class EMIWindow(MainWindow):
 
             workbook.Save()
             logger.info("压缩包已嵌入并保存: %s", os.path.abspath(save_file))
+            if close_workbook:
+                workbook.Close(SaveChanges=False)
+                logger.info("已关闭嵌入用工作簿: %s", os.path.abspath(save_file))
             if self.settings_value["CloseExcel"]:
                 excel.Quit()
                 logger.info("已按设置关闭 Excel。")
         except Exception as exc:
             logger.exception("嵌入压缩包到 Excel 失败: %s", exc)
+            if close_workbook and workbook is not None:
+                try:
+                    workbook.Close(SaveChanges=False)
+                except Exception:
+                    logger.exception("关闭嵌入用工作簿失败")
             QMessageBox.critical(self, "Error", f"Error adding zip to Excel: {exc}")
 
 

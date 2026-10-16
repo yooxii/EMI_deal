@@ -25,8 +25,9 @@
     out_dir     报告输出目录（可选，默认数据目录的上一级）
     out_name    报告文件名（可选，默认去掉模板名中的 _<数量> 后缀）
     zip         是否生成 PDF 压缩包（默认否）
-    embed       是否把压缩包嵌入 Excel（默认否，需本机 Excel）
-    close_excel 嵌入后是否关闭 Excel（默认否）
+    embed       是否把压缩包嵌入 Excel（默认否，需本机 Excel；嵌入后不再单独保留压缩包）
+    close_excel 嵌入后是否关闭 Excel（默认否；批处理始终只关闭自己打开的工作簿）
+    docx2pdf    数据目录里只有 docx 时是否先用 Word 转出 PDF（默认是，单线程）
 
 输出：一行一个 JSON 结果（ok / out_file / reports / error），退出码 0 表示全部成功。
 """
@@ -148,6 +149,7 @@ def load_jobs(args: argparse.Namespace) -> list[dict[str, Any]]:
         "embed": args.embed,
         "close_excel": args.close_excel,
         "backup_existing": not args.no_backup,
+        "docx2pdf": not args.no_docx2pdf,
     }
     return [job]
 
@@ -204,6 +206,34 @@ def order_reports(
     return ordered
 
 
+def ensure_pdfs(data_dir: str, serials: Sequence[str]) -> int:
+    """数据目录里只有 docx、没有对应 pdf 时，先用 Word 转出 PDF（单线程）。
+
+    只转换作业关心的序列号；已在运行 Word 时复用其进程，不关掉用户的文档。
+    """
+    wanted = {str(s).strip() for s in serials if str(s).strip()}
+    docx_names = [n for n in os.listdir(data_dir) if n.lower().endswith(".docx")]
+    if wanted:
+        docx_names = [n for n in docx_names if n.split("-")[0].strip() in wanted]
+    missing = [
+        n for n in docx_names
+        if not os.path.exists(os.path.join(data_dir, os.path.splitext(n)[0] + ".pdf"))
+    ]
+    if not missing:
+        return 0
+
+    logger.info("发现 %d 份 docx 尚未转 PDF，开始用 Word 转换（单线程）", len(missing))
+    from docx2pdf import convert_docx_files
+
+    converted, failed = convert_docx_files(
+        [os.path.join(data_dir, n) for n in missing]
+    )
+    logger.info("docx→pdf 完成: 成功 %d, 失败 %d", converted, failed)
+    if failed:
+        logger.warning("有 %d 份 docx 转换失败，对应序列号将缺少数据", failed)
+    return converted
+
+
 def strip_model_suffix(filename: str, model: str) -> str:
     """去掉输出文件名末尾的下划线与机种名（``..._FSF059-00CG.xlsx`` → ``....xlsx``）。"""
     stem, ext = os.path.splitext(filename)
@@ -223,6 +253,11 @@ def run_job(main_mod: Any, win: Any, job: dict[str, Any], dry_run: bool = False)
         raise RuntimeError("模板不存在: %s" % template)
 
     os.chdir(REPO_ROOT)
+    converted = 0
+    if job.get("docx2pdf", True):
+        converted = ensure_pdfs(
+            os.path.abspath(job["data_dir"]), job.get("serials") or []
+        )
     work_dir, temp_root = prepare_workspace(job)
     try:
         os.chdir(REPO_ROOT)
@@ -260,7 +295,8 @@ def run_job(main_mod: Any, win: Any, job: dict[str, Any], dry_run: bool = False)
         win.date_test.setDate(parsed_date if parsed_date.isValid() else QDate.currentDate())
         win.settings_value.update(
             {
-                "NeedZip": bool(job.get("zip")),
+                # 压缩与嵌入在批处理里同步执行（GUI 走线程 + 事件循环，这里没有事件循环）
+                "NeedZip": False,
                 "AddZip": bool(job.get("embed")),
                 "CloseExcel": bool(job.get("close_excel")),
             }
@@ -276,6 +312,21 @@ def run_job(main_mod: Any, win: Any, job: dict[str, Any], dry_run: bool = False)
         saved_path = os.path.abspath(saved)
         if not os.path.exists(saved_path):
             raise RuntimeError("报告文件未找到: %s" % saved_path)
+
+        # 压缩包：直接同步调用 ZipThread 的打包逻辑（只打包本次用到的 PDF）
+        zip_path = None
+        if job.get("zip") or job.get("embed"):
+            main_mod.ZipThread(work_dir, model).zip_folder()
+            zip_path = os.path.join(os.getcwd(), "%s.zip" % model)
+            if not os.path.exists(zip_path):
+                raise RuntimeError("压缩包未生成: %s" % zip_path)
+            logger.info("已生成压缩包: %s", zip_path)
+
+        # 嵌入压缩包：复用主窗口的实现（同时补齐最后一行底边的粗边框）；
+        # 嵌入后立即关闭工作簿并保持 Excel 不可见，否则文件被占用无法归档
+        if job.get("embed"):
+            win.add_zip_to_excel(model, saved, close_workbook=True, visible=False)
+            logger.info("压缩包嵌入完成: %s", saved)
 
         out_dir = job.get("out_dir") or os.path.dirname(os.path.abspath(job["data_dir"]))
         os.makedirs(out_dir, exist_ok=True)
@@ -298,18 +349,31 @@ def run_job(main_mod: Any, win: Any, job: dict[str, Any], dry_run: bool = False)
                     logger.info("已备份同名旧报告: %s", backup_path)
                 else:
                     os.remove(out_path)
-            shutil.move(saved_path, out_path)
+            # Excel 释放文件句柄可能稍有延迟，重试几次再放弃
+            for attempt in range(30):
+                try:
+                    shutil.move(saved_path, out_path)
+                    break
+                except PermissionError:
+                    if attempt == 29:
+                        raise
+                    time.sleep(1)
 
-        zip_path = None
-        if job.get("zip"):
-            zip_path = os.path.join(os.getcwd(), "%s.zip" % model)
-            if os.path.exists(zip_path):
+        # 压缩包：已嵌入报告时不再单独保留；只要求打包时放到报告旁边
+        if zip_path:
+            if job.get("embed"):
+                try:
+                    os.remove(zip_path)
+                except OSError:
+                    logger.warning("删除临时压缩包失败: %s", zip_path)
+                zip_path = None
+            else:
                 target_zip = os.path.join(out_dir, os.path.basename(zip_path))
-                if os.path.abspath(target_zip) != zip_path:
+                if target_zip != zip_path:
                     if os.path.exists(target_zip):
                         os.remove(target_zip)
                     shutil.move(zip_path, target_zip)
-                zip_path = target_zip
+                    zip_path = target_zip
 
         return {
             "ok": True,
@@ -320,6 +384,7 @@ def run_job(main_mod: Any, win: Any, job: dict[str, Any], dry_run: bool = False)
             "out_file": out_path,
             "backup_file": backup_path,
             "zip_file": zip_path,
+            "docx_converted": converted,
             "seconds": round(time.perf_counter() - started_at, 2),
         }
     finally:
@@ -351,6 +416,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-backup",
         action="store_true",
         help="目标目录已有同名报告时直接覆盖（默认先改名备份）",
+    )
+    parser.add_argument(
+        "--no-docx2pdf",
+        action="store_true",
+        help="数据目录里只有 docx 时不自动用 Word 转 PDF",
     )
     parser.add_argument("--dry-run", action="store_true", help="只检查参数与数据，不写文件")
     return parser
