@@ -241,6 +241,19 @@ def safe_filename(name: str) -> str:
     return name
 
 
+def replace_names_simultaneously(name: str, pairs) -> str:
+    """一次性（并行）替换文件名里的多个字符串。
+
+    逐条替换会在「源序列号与目标序列号互为彼此」时来回倒手（例如 513→514 之后
+    又被 514→513 换回去），因此这里用一次正则匹配同时替换。
+    """
+    if not pairs:
+        return name
+    pattern = re.compile("|".join(re.escape(old) for old, _ in pairs))
+    mapping = dict(pairs)
+    return pattern.sub(lambda match: mapping[match.group(0)], name)
+
+
 def prepare_replaced_data(job: dict[str, Any]) -> tuple[str, str]:
     """按 ``replace_map`` 用 Word 替换工具改写 docx，输出到临时目录。
 
@@ -268,6 +281,7 @@ def prepare_replaced_data(job: dict[str, Any]) -> tuple[str, str]:
     pairs.sort(key=lambda pair: len(pair[0]), reverse=True)
     olds = [old for old, _ in pairs]
     news = [new for _, new in pairs]
+    placeholders = ["EMIBATCHPLACEHOLDER%d" % index for index in range(len(pairs))]
 
     model = os.path.basename(src.rstrip("\\/"))
     temp_root = tempfile.mkdtemp(prefix="emi_repl_")
@@ -285,20 +299,23 @@ def prepare_replaced_data(job: dict[str, Any]) -> tuple[str, str]:
         work_dir,
     )
     for name in docx_names:
-        new_name = name
-        for old, new in pairs:
-            new_name = new_name.replace(old, new)
+        target_name = safe_filename(replace_names_simultaneously(name, pairs))
+        target_path = os.path.join(work_dir, target_name)
+        staged = os.path.join(work_dir, "_stage_tmp.docx")
         try:
+            # 两段式：先把源串换成占位符、再把占位符换成目标串，
+            # 避免「源串与目标串互为彼此」时被后一条替换倒回去
             replace_text_in_docx(
-                os.path.join(src, name),
-                os.path.join(work_dir, safe_filename(new_name)),
-                olds,
-                news,
+                os.path.join(src, name), staged, olds, placeholders
             )
+            replace_text_in_docx(staged, target_path, placeholders, news)
         except Exception:
             # 失败时不要留下半个临时目录（prepare_workspace 的清理逻辑还没接管）
             shutil.rmtree(temp_root, ignore_errors=True)
             raise
+        finally:
+            if os.path.exists(staged):
+                os.remove(staged)
 
     # 源目录可能还含别的序列号（替换后仍是原样），只保留目标序列号，避免机种数超限
     keep = {str(s).strip() for s in (job.get("serials") or []) if str(s).strip()}
