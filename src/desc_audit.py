@@ -166,9 +166,49 @@ def _audit_voltage(
 
     runs = _collect_runs(matches, line)
     if len(runs) > 1:
+        # 分频段写法（110Vac/60Hz, and 220Vac/50Hz）：并把对不上的电压按最接近的档位改掉
+        described_all = sorted(
+            {float(match.group("num")) for run in runs for match in run}
+        )
+        if described_all == list(voltages):
+            return line, changes, warnings
+
+        tokens = sorted(
+            [match for run in runs for match in run],
+            key=lambda match: match.start(),
+            reverse=True,
+        )
+        fixed: list[float] = []
+        for match in tokens:
+            value = float(match.group("num"))
+            if value in voltages:
+                fixed.append(value)
+                continue
+            new_value = min(voltages, key=lambda item: abs(item - value))
+            fixed.append(new_value)
+            replacement = "%s%s%s" % (
+                _fmt(new_value),
+                match.group("v"),
+                match.group("unit") or "",
+            )
+            line = line[: match.start()] + replacement + line[match.end() :]
+
+        if sorted(set(fixed)) == list(voltages):
+            changes.append(
+                "输入电压：%s → %s"
+                % (
+                    "、".join("%sV" % _fmt(value) for value in described_all),
+                    "、".join("%sV" % _fmt(value) for value in voltages),
+                )
+            )
+            return line, changes, warnings
+
         warnings.append(
-            "输入电压有多段写法（%s），未自动修改，请人工确认"
-            % _original_text(runs[0], _separators_between(runs[0], line))
+            "输入电压写成多段（描述里是 %s，数据是 %s），未自动修改，请人工确认"
+            % (
+                "、".join("%sV" % _fmt(value) for value in sorted(set(fixed))),
+                "、".join("%sV" % _fmt(value) for value in voltages),
+            )
         )
         return line, changes, warnings
 
