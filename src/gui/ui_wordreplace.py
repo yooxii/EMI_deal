@@ -70,11 +70,14 @@ def replace_text_in_docx(
     output_path: str,
     old_str: str | Sequence[str] | None,
     new_str: str | Sequence[str] | None,
+    jitter: bool = True,
 ) -> None:
     """在 docx 的 XML 文本层做替换，并另存为新文件。
 
     :param old_str: 待替换的字符串；也可以是等长的字符串列表
     :param new_str: 替换后的字符串；与 ``old_str`` 形式对应
+    :param jitter: 是否对测量数值做小幅随机抖动（默认开启，用于造差异化数据）；
+        只做纯文本替换（例如换序列号）时传 ``False``，测量值保持与源文档一致
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
         with zipfile.ZipFile(input_path, "r") as docx_zip:
@@ -94,7 +97,8 @@ def replace_text_in_docx(
                 if source is None:
                     continue
                 content = content.replace(source, target)
-        content = replace_value(content)
+        if jitter:
+            content = replace_value(content)
 
         with open(document_xml_path, "w", encoding="utf-8") as fp:
             fp.write(content)

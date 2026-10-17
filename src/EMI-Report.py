@@ -11,6 +11,7 @@ import re
 import sys
 import time
 import zipfile
+from copy import copy
 from io import BytesIO
 from typing import Any, Callable, NamedTuple, Sequence
 
@@ -18,6 +19,10 @@ import openpyxl as xl
 import pdfplumber
 import win32com.client as win32
 from openpyxl.drawing import image
+from openpyxl.formula.translate import Translator
+from openpyxl.styles import Border, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.cell_range import CellRange, MultiCellRange
 from PIL import Image as PImage
 from PySide6 import __version__ as pyside_version
 from PySide6.QtCore import (
@@ -67,6 +72,7 @@ from gui.ui_docx2pdf import Docx2PdfWindow
 from gui.ui_wordreplace import WordReplace
 from logger import get_error_logger, log_checkpoint, setup_logging
 from naming import collect_name_tokens
+from picmatch import DEFAULT_PIC_DIR, describe_match, find_model_image
 
 # --------------------------------------------------------------------------- #
 # 常量与配置
@@ -74,7 +80,7 @@ from naming import collect_name_tokens
 
 LOG_FILENAME = "EMIRper.log"
 APP_TITLE = "EMI-Report"  # 窗口标题前缀（后面跟随数据路径的文件夹名）
-APP_VERSION = "2.7"
+APP_VERSION = "2.8"
 STATE_SAVE_DELAY_MS = 300  # 输入变化后延迟落盘的防抖时间
 SERIAL_REFRESH_DELAY_MS = 500  # 数据路径变化后延迟刷新序列号的防抖时间
 REPORT_FILE_SUFFIX = ".pdf"  # 提取序列号时依据的报告文件后缀
@@ -131,6 +137,7 @@ WEEK_COLUMN = 9  # I 列：每个序列号块的周期 / D/C
 IMAGE_ANCHOR_CELL = "C27"  # 测试图片插入位置
 IMAGE_HEIGHT_PIXELS = 250  # 图片按高度等比缩放
 IMAGE_JPEG_QUALITY = 100
+THICK_BORDER_STYLE = "medium"  # 粗边框线型（测试描述框用的就是它）
 # 数据列偏移 -> PDF 数据行的字段下标（None 表示固定写 EMPTY_MARK）
 MEASUREMENT_CELL_SOURCES: tuple[tuple[int, int | None], ...] = (
     (1, 0),
@@ -146,6 +153,114 @@ MEASUREMENT_CELL_SOURCES: tuple[tuple[int, int | None], ...] = (
 def template_path_for(load_qty: int) -> str:
     """按负载数量拼出 ``template/`` 下对应的模板路径（如 ``..._10.xlsx``）。"""
     return os.path.join(TEMPLATE_DIR, f"2.1 Conducted EMI Measurement_{load_qty}.xlsx")
+
+
+def delete_rows_keep_format(sheet, rows: Sequence[int]) -> int:
+    """删除工作表中的若干行，并同步维护合并区域、行高与公式引用。
+
+    ``openpyxl`` 自带的 ``delete_rows`` 只搬单元格：合并区域不会跟着平移，公式里的
+    行号也不会改。删完就会出现「机种块边框消失、合并区跨到别的块、W/X 列的 =T-Q
+    指向下一块」这类格式错乱，所以这里自己实现一份：
+
+    - 合并区域按保留下来的行重新计算，整体被删掉的合并直接丢弃；
+    - 合并区底边 / 顶边所在行被删掉时，把那条边框搬到新的边缘行，避免表格缺口；
+    - 被搬动的单元格如果是公式，用 ``Translator`` 把行号一并改掉。
+
+    返回实际删除的行数。
+    """
+    rows = sorted({int(row) for row in rows if int(row) >= 1})
+    if not rows:
+        return 0
+
+    deleted = set(rows)
+    positions: dict[int, int] = {}
+    for index, row in enumerate(
+        (row for row in range(1, sheet.max_row + 1) if row not in deleted), start=1
+    ):
+        positions[row] = index
+
+    # 1) 合并区域：先按保留的行算出新位置，顺手记下要搬走的边缘边框
+    edge_borders: list[tuple[int, int, str, Any]] = []
+    shifted_merges: list[CellRange] = []
+    for cell_range in list(sheet.merged_cells.ranges):
+        kept = [
+            row
+            for row in range(cell_range.min_row, cell_range.max_row + 1)
+            if row not in deleted
+        ]
+        if not kept:
+            continue
+        new_min, new_max = positions[kept[0]], positions[kept[-1]]
+        shifted_merges.append(
+            CellRange(
+                min_col=cell_range.min_col,
+                min_row=new_min,
+                max_col=cell_range.max_col,
+                max_row=new_max,
+            )
+        )
+        for edge_row, new_edge, side in (
+            (cell_range.max_row, new_max, "bottom"),
+            (cell_range.min_row, new_min, "top"),
+        ):
+            if edge_row not in deleted:
+                continue
+            for col in range(cell_range.min_col, cell_range.max_col + 1):
+                source = sheet._cells.get((edge_row, col))
+                if source is None:
+                    continue
+                border = getattr(source.border, side)
+                if border is not None and border.style is not None:
+                    edge_borders.append((new_edge, col, side, copy(border)))
+
+    # 2) 搬单元格：样式跟着单元格走，公式改行号
+    cells = dict(sheet._cells)
+    sheet._cells.clear()
+    for (row, col), cell in cells.items():
+        if row in deleted:
+            continue
+        new_row = positions.get(row)
+        if new_row is None:
+            continue
+        formula = cell.value if cell.data_type == "f" else None
+        origin = "%s%d" % (get_column_letter(col), row)
+        cell.row = new_row
+        cell.column = col
+        if formula is not None and new_row != row:
+            cell.value = Translator(formula, origin=origin).translate_formula(
+                "%s%d" % (get_column_letter(col), new_row)
+            )
+        sheet._cells[(new_row, col)] = cell
+
+    # 3) 行高跟着行号一起搬
+    heights = dict(sheet.row_dimensions)
+    for index in list(sheet.row_dimensions):
+        del sheet.row_dimensions[index]
+    for old_row, dimension in heights.items():
+        new_row = positions.get(old_row)
+        if new_row is None:
+            continue
+        dimension.index = new_row
+        sheet.row_dimensions[new_row] = dimension
+
+    # 4) 合并区域换成新坐标（不能直接改旧对象：MultiCellRange 是按坐标做哈希的集合）
+    sheet.merged_cells = MultiCellRange(set(shifted_merges))
+
+    # 5) 把搬到新位置的下边框 / 上边框补回去
+    for new_edge, col, side, border in edge_borders:
+        cell = sheet.cell(row=new_edge, column=col)
+        current = cell.border
+        cell.border = Border(
+            **{
+                "left": current.left,
+                "right": current.right,
+                "top": current.top,
+                "bottom": current.bottom,
+                side: border,
+            }
+        )
+
+    return len(rows)
 
 
 class SettingItem(NamedTuple):
@@ -760,6 +875,7 @@ class EMIWindow(MainWindow):
                 self.rootpath = os.path.split(path)[0]
                 self.lineEdit_model.setText(path)
                 logger.info("已选择数据目录: %s", path)
+                self._auto_pick_image(path)
         except Exception as exc:
             error_logger.log_error(
                 "Failed to select model path", exc_info=exc, context="select_modelpath"
@@ -794,6 +910,23 @@ class EMIWindow(MainWindow):
                 self, "错误", f"选择模板失败: {exc}\n详细信息已记录到 error.log"
             )
         return None
+
+    def _auto_pick_image(self, model_dir: str) -> None:
+        """数据目录选好后，若图片框还空着，按机种名去图片目录里挑一张。"""
+        if self.lineEdit_img.text().strip():
+            return
+        model = os.path.basename(model_dir.rstrip("\\/"))
+        image_path = find_model_image(model, DEFAULT_PIC_DIR)
+        if not image_path:
+            logger.info("机种 %s 没有匹配的测试图片（图片目录: %s）", model, DEFAULT_PIC_DIR)
+            return
+        self.lineEdit_img.setText(image_path)
+        logger.info(
+            "按机种 %s 自动匹配测试图片: %s（%s）",
+            model,
+            image_path,
+            describe_match(model, image_path),
+        )
 
     def select_imgpath(self) -> None:
         """选择要插入报告的测试图片。"""
@@ -1164,6 +1297,7 @@ class EMIWindow(MainWindow):
         )
 
         uut_name = self._write_header(sheet, model_dir_name)
+        self._apply_detail_borders(sheet)
         self._insert_test_image(sheet)
 
         uut_count = len({name.split("-")[0] for name in report_data})
@@ -1236,6 +1370,35 @@ class EMIWindow(MainWindow):
         )
         return uut_name
 
+    def _apply_detail_borders(self, sheet) -> None:
+        """补齐「测试描述」区域的粗边框：模板只给了上 / 下 / 左，右边仍是细线。"""
+        row = int(HEADER_CELL_DETAIL[1:])
+        columns = [
+            col
+            for col in range(2, self.col_end_ + 1)
+            if sheet.cell(row=row, column=col).border.top.style == THICK_BORDER_STYLE
+        ]
+        if not columns:
+            logger.warning("测试描述区域没找到粗边框基准，跳过右边框补充。")
+            return
+
+        first_col, last_col = min(columns), max(columns)
+        edge = sheet.cell(row=row, column=first_col).border.left
+        if edge is None or edge.style != THICK_BORDER_STYLE:
+            edge = Side(style=THICK_BORDER_STYLE)
+
+        target = sheet.cell(row=row, column=last_col)
+        border = target.border
+        target.border = Border(
+            left=border.left, right=edge, top=border.top, bottom=border.bottom
+        )
+        logger.info(
+            "测试描述区域右边框已补为粗线: %s（区域 %s:%s 列）",
+            target.coordinate,
+            get_column_letter(first_col),
+            get_column_letter(last_col),
+        )
+
     def _insert_test_image(self, sheet) -> None:
         """把测试图片等比缩放后插入模板的指定位置。"""
         image_path = self.lineEdit_img.text()
@@ -1278,19 +1441,20 @@ class EMIWindow(MainWindow):
         """按实际机种数量删除模板中多余的机种区段。"""
         block_rows = load_qty * ROWS_PER_UUT_UNIT
         first_spare_row = self.row_sn_ + block_rows * uut_count
+        spare_rows = block_rows * (MAX_UUT_COUNT - uut_count)
 
-        for cell_range in list(sheet.merged_cells):
-            if cell_range.min_row == first_spare_row:
-                sheet.unmerge_cells(cell_range.coord)
+        if spare_rows > 0:
+            delete_rows_keep_format(
+                sheet, range(first_spare_row, first_spare_row + spare_rows)
+            )
 
-        sheet.delete_rows(first_spare_row, block_rows * (MAX_UUT_COUNT - uut_count))
         self.row_end_ = sheet.max_row - REPORT_TAIL_ROWS
         logger.info(
             "报告行调整: 机种数=%d, 每机种行数=%d, 自第 %d 行起删除 %d 行, 数据结束行=%d",
             uut_count,
             block_rows,
             first_spare_row,
-            block_rows * (MAX_UUT_COUNT - uut_count),
+            spare_rows,
             self.row_end_,
         )
 
@@ -1563,90 +1727,6 @@ class EMIWindow(MainWindow):
             f"未找到含 {voltage_token}/{load_token}/{phase_token} 的文件）"
         )
 
-    def _cleanup_orphan_merges(self, sheet) -> None:
-        """清理落在表格之外的残留合并区域（删行后模板可能遗留）。"""
-        limit = self.row_end_ + REPORT_TAIL_ROWS
-        orphans = [rng.coord for rng in sheet.merged_cells if rng.min_row > limit]
-        for coord in orphans:
-            try:
-                sheet.unmerge_cells(coord)
-            except KeyError:
-                # 该区域的单元格已随删行消失，合并记录已移除即可
-                logger.debug("跳过已失效的合并区域: %s", coord)
-
-    def _collect_block_merges(
-        self, sheet, block_rows: int
-    ) -> list[tuple[int, int, int, int]]:
-        """记录模板第一个块内的合并模式：(起始偏移, 结束偏移, 起始列, 结束列)。"""
-        block_start = self.row_sn_
-        patterns: list[tuple[int, int, int, int]] = []
-        for cell_range in sheet.merged_cells:
-            if block_start <= cell_range.min_row < block_start + block_rows:
-                patterns.append(
-                    (
-                        cell_range.min_row - block_start,
-                        cell_range.max_row - block_start,
-                        cell_range.min_col,
-                        cell_range.max_col,
-                    )
-                )
-        return patterns
-
-    def _rebuild_block_merges(
-        self,
-        sheet,
-        patterns: list[tuple[int, int, int, int]],
-        kept_offsets: list[int],
-        uut_count: int,
-        new_block_rows: int,
-    ) -> None:
-        """删行后按新的块结构重建合并区域。
-
-        块内的合并区域（序号、序列号、工令、版本、周期、电压段、负载档）在删行后
-        会与新行号错位，这里按"保留下来的原始行"重新合并。
-        """
-        if new_block_rows <= 0:
-            logger.warning("新的块行数异常(%s)，跳过合并区域重建。", new_block_rows)
-            return
-
-        # 先解除数据区内已错位的合并（数据列不在这些合并区内，不会伤到数据）
-        for coord in [
-            rng.coord
-            for rng in sheet.merged_cells
-            if rng.max_row >= self.row_sn_ and rng.min_row <= self.row_end_
-        ]:
-            try:
-                sheet.unmerge_cells(coord)
-            except KeyError:
-                logger.debug("跳过已失效的合并区域: %s", coord)
-
-        position_of = {offset: index for index, offset in enumerate(kept_offsets)}
-        for index in range(uut_count):
-            base_row = self.row_sn_ + index * new_block_rows
-            for start_offset, end_offset, min_col, max_col in patterns:
-                kept = [
-                    offset
-                    for offset in range(start_offset, end_offset + 1)
-                    if offset in position_of
-                ]
-                if not kept:
-                    continue
-                try:
-                    sheet.merge_cells(
-                        start_row=base_row + position_of[kept[0]],
-                        start_column=min_col,
-                        end_row=base_row + position_of[kept[-1]],
-                        end_column=max_col,
-                    )
-                except Exception:
-                    logger.exception(
-                        "重建合并区域失败: 列 %s-%s, 第 %s 个序列号",
-                        min_col,
-                        max_col,
-                        index + 1,
-                    )
-        logger.info("已按新的块结构重建合并区域: %d 个序列号", uut_count)
-
     def _check_measurement_gaps(
         self, sheet, load_qty: int, uut_count: int, model_dir: str
     ) -> None:
@@ -1708,48 +1788,15 @@ class EMIWindow(MainWindow):
             logger.warning("数据缺失: %s", item)
 
         if removable_rows:
-            # 删行会移动单元格，但合并区域不会跟着平移：先记录模板块内的合并模式，
-            # 删行后再按保留下来的行重建，避免序列号 / 工令的合并区跨到别的块上。
-            block_rows = load_qty * ROWS_PER_UUT_UNIT
-            block_start = self.row_sn_
-            patterns = self._collect_block_merges(sheet, block_rows)
-            removed_offsets = {
-                row - block_start
-                for row in removable_rows
-                if block_start <= row < block_start + block_rows
-            }
-            kept_offsets = [
-                offset for offset in range(block_rows) if offset not in removed_offsets
-            ]
-
-            for row in sorted(removable_rows, reverse=True):
-                sheet.delete_rows(row, 1)
+            # 合并区域 / 行高 / 公式引用都由 delete_rows_keep_format 一并维护，
+            # 不会出现删完后机种块边框消失、合并区跨块的问题。
+            delete_rows_keep_format(sheet, removable_rows)
             self.row_end_ = sheet.max_row - REPORT_TAIL_ROWS
-
-            new_block_rows = len(kept_offsets)
-            serials = [
-                sheet.cell(
-                    row=self.row_sn_ + index * new_block_rows, column=self.col_sn_
-                ).value
-                for index in range(uut_count)
-            ]
-
-            self._rebuild_block_merges(
-                sheet, patterns, kept_offsets, uut_count, new_block_rows
-            )
-            # 重建合并会清掉合并区内非左上角的单元格，序列号需要写回块首行
-            for index, serial in enumerate(serials):
-                if serial:
-                    sheet.cell(
-                        row=self.row_sn_ + index * new_block_rows,
-                        column=self.col_sn_,
-                    ).value = serial
-
-            self._cleanup_orphan_merges(sheet)
             logger.info(
-                "已删除 %d 个空条件行（每个序列号 %d 行），数据结束行更新为 %s",
+                "已删除 %d 个空条件行（%d 个序列号各 %d 行），数据结束行更新为 %s",
                 len(removable_rows),
-                len(removed_offsets),
+                uut_count,
+                len(removable_rows) // max(uut_count, 1),
                 self.row_end_,
             )
 

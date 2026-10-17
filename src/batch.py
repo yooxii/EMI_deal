@@ -21,7 +21,8 @@
     week/rev/workno   周期 / 版本 / 工令，写入每个序列号块
     detail      测试描述文本（或 detail_file 指定文本文件）
     test_date   测试日期 YYYY/MM/DD（默认今天）
-    image       测试图片路径（可选）
+    image       测试图片路径（可选；留空则按 pic_dir 里的机种名自动匹配）
+    pic_dir     测试图片目录（可选；命令行 --pic-dir 或默认 D:\Desktop_Li\WorkDir\PIC\EMI）
     out_dir     报告输出目录（可选，默认数据目录的上一级）
     out_name    报告文件名（可选，默认去掉模板名中的 _<数量> 后缀）
     zip         是否生成 PDF 压缩包（默认否）
@@ -50,6 +51,8 @@ SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SRC_DIR)
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
+
+from picmatch import DEFAULT_PIC_DIR  # noqa: E402  (依赖上面的 sys.path 设置)
 
 # 离屏平台：不创建可见窗口，但仍能实例化 QWidget
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -120,12 +123,25 @@ def default_template(main_mod: Any, load_qty: int) -> str:
 
 def load_jobs(args: argparse.Namespace) -> list[dict[str, Any]]:
     """从 --job 文件或命令行参数组装作业列表。"""
+    pic_dir = "" if args.no_image else (args.pic_dir or DEFAULT_PIC_DIR)
     if args.job:
         with open(args.job, encoding="utf-8") as fp:
             payload = json.load(fp)
         jobs = payload.get("jobs") if isinstance(payload, dict) else payload
         if not isinstance(jobs, list):
             raise SystemExit("作业文件格式错误：应为 {\"jobs\": [...]} 或数组")
+        for job in jobs:
+            # 命令行上的图片目录 / 图片路径优先于作业文件
+            job.setdefault("pic_dir", pic_dir)
+            if args.no_image:
+                job["pic_dir"] = ""
+                job["image"] = ""
+            if args.pic_dir:
+                job["pic_dir"] = args.pic_dir
+            if args.image:
+                job["image"] = args.image
+            if args.no_jitter:
+                job["jitter"] = False
         return jobs
 
     detail = args.detail or ""
@@ -142,7 +158,8 @@ def load_jobs(args: argparse.Namespace) -> list[dict[str, Any]]:
         "workno": args.workno,
         "detail": detail,
         "test_date": args.date,
-        "image": args.image,
+        "image": args.image or "",
+        "pic_dir": pic_dir,
         "out_dir": args.out,
         "out_name": args.name,
         "zip": args.zip,
@@ -150,6 +167,7 @@ def load_jobs(args: argparse.Namespace) -> list[dict[str, Any]]:
         "close_excel": args.close_excel,
         "backup_existing": not args.no_backup,
         "docx2pdf": not args.no_docx2pdf,
+        "jitter": not args.no_jitter,
     }
     return [job]
 
@@ -290,6 +308,12 @@ def prepare_replaced_data(job: dict[str, Any]) -> tuple[str, str]:
 
     from gui.ui_wordreplace import replace_text_in_docx
 
+    # 默认沿用替换工具的「数值小幅抖动」（造差异化数据）；作业给 jitter=false 时
+    # 只做纯文本替换，测量值与源文档保持一致
+    jitter = bool(job.get("jitter", True))
+    if not jitter:
+        logger.info("本次替换已关闭数值抖动，测量值保持与源文档一致。")
+
     docx_names = [n for n in os.listdir(src) if n.lower().endswith(".docx")]
     logger.info(
         "Word 替换: 源=%s, docx=%d 份, 字符串组=%d -> %s",
@@ -306,9 +330,11 @@ def prepare_replaced_data(job: dict[str, Any]) -> tuple[str, str]:
             # 两段式：先把源串换成占位符、再把占位符换成目标串，
             # 避免「源串与目标串互为彼此」时被后一条替换倒回去
             replace_text_in_docx(
-                os.path.join(src, name), staged, olds, placeholders
+                os.path.join(src, name), staged, olds, placeholders, jitter=False
             )
-            replace_text_in_docx(staged, target_path, placeholders, news)
+            replace_text_in_docx(
+                staged, target_path, placeholders, news, jitter=jitter
+            )
         except Exception:
             # 失败时不要留下半个临时目录（prepare_workspace 的清理逻辑还没接管）
             shutil.rmtree(temp_root, ignore_errors=True)
@@ -324,6 +350,51 @@ def prepare_replaced_data(job: dict[str, Any]) -> tuple[str, str]:
         if name.split("-")[0].strip() not in keep:
             os.remove(os.path.join(work_dir, name))
     return work_dir, temp_root
+
+
+def job_model_name(job: dict[str, Any]) -> str:
+    """作业对应的机种名：优先作业自带的 ``_model``，其次报告目录名，最后数据目录名。"""
+    model = str(job.get("_model") or "").strip()
+    if model:
+        return model
+
+    out_dir = str(job.get("out_dir") or "").replace("/", "\\")
+    for part in reversed([p for p in out_dir.split("\\") if p.strip()]):
+        match = re.match(r"^(.+?)\s+ORT Test Report", part)
+        if match:
+            return match.group(1).strip()
+
+    return os.path.basename(os.path.abspath(job["data_dir"]).rstrip("\\/"))
+
+
+def resolve_image(job: dict[str, Any]) -> str:
+    """测试图片：作业显式给了就用作业的，否则按机种名在同系列图片里挑一张。"""
+    explicit = str(job.get("image") or "").strip()
+    if explicit:
+        if os.path.exists(explicit):
+            return explicit
+        logger.warning("作业指定的测试图片不存在: %s", explicit)
+        return ""
+
+    pic_dir = str(job.get("pic_dir") or "").strip()
+    if not pic_dir:
+        return ""
+
+    from picmatch import describe_match, find_model_image
+
+    model = job_model_name(job)
+    image_path = find_model_image(model, pic_dir)
+    if image_path:
+        logger.info(
+            "机种 %s 匹配到测试图片: %s（%s）",
+            model,
+            image_path,
+            describe_match(model, image_path),
+        )
+        return image_path
+
+    logger.warning("机种 %s 在 %s 里没有匹配的测试图片，本次按无图生成。", model, pic_dir)
+    return ""
 
 
 def strip_model_suffix(filename: str, model: str) -> str:
@@ -365,6 +436,7 @@ def run_job(main_mod: Any, win: Any, job: dict[str, Any], dry_run: bool = False)
         report_data = order_reports(report_data, job.get("serials") or [])
         serials = sorted({name.split("-")[0] for name in report_data})
         logger.info("解析到 %d 份报告，序列号: %s", len(report_data), ", ".join(serials))
+        image_path = resolve_image(job)
 
         if dry_run:
             return {
@@ -374,6 +446,7 @@ def run_job(main_mod: Any, win: Any, job: dict[str, Any], dry_run: bool = False)
                 "template": template,
                 "reports": len(report_data),
                 "serials": serials,
+                "image": image_path,
                 "seconds": round(time.perf_counter() - started_at, 2),
             }
 
@@ -387,7 +460,7 @@ def run_job(main_mod: Any, win: Any, job: dict[str, Any], dry_run: bool = False)
         win.lineEdit_workerno.setText(str(job.get("workno") or ""))
         win.check_diff_workno.setChecked(False)
         win.text_detail.setPlainText(str(job.get("detail") or ""))
-        win.lineEdit_img.setText(str(job.get("image") or ""))
+        win.lineEdit_img.setText(image_path)
         test_date = str(job.get("test_date") or "")
         parsed_date = QDate.fromString(test_date, "yyyy/MM/dd")
         win.date_test.setDate(parsed_date if parsed_date.isValid() else QDate.currentDate())
@@ -482,6 +555,7 @@ def run_job(main_mod: Any, win: Any, job: dict[str, Any], dry_run: bool = False)
             "out_file": out_path,
             "backup_file": backup_path,
             "zip_file": zip_path,
+            "image": image_path,
             "docx_converted": converted,
             "seconds": round(time.perf_counter() - started_at, 2),
         }
@@ -505,6 +579,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--detail-file", help="测试描述文本文件（UTF-8）")
     parser.add_argument("--date", help="测试日期 YYYY/MM/DD")
     parser.add_argument("--image", help="测试图片路径")
+    parser.add_argument(
+        "--pic-dir",
+        default=None,
+        help="测试图片目录（默认 %s，按机种名/同系列自动匹配）" % DEFAULT_PIC_DIR,
+    )
+    parser.add_argument("--no-image", action="store_true", help="不插入测试图片")
     parser.add_argument("--out", help="报告输出目录")
     parser.add_argument("--name", help="报告文件名")
     parser.add_argument("--zip", action="store_true", help="生成 PDF 压缩包")
@@ -519,6 +599,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-docx2pdf",
         action="store_true",
         help="数据目录里只有 docx 时不自动用 Word 转 PDF",
+    )
+    parser.add_argument(
+        "--no-jitter",
+        action="store_true",
+        help="替换序列号时不做数值抖动（测量值保持与源文档一致）",
     )
     parser.add_argument("--dry-run", action="store_true", help="只检查参数与数据，不写文件")
     return parser
