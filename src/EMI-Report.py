@@ -72,6 +72,7 @@ from gui.ui_docx2pdf import Docx2PdfWindow
 from gui.ui_wordreplace import WordReplace
 from logger import get_error_logger, log_checkpoint, setup_logging
 from naming import collect_name_tokens
+from desc_audit import audit_test_detail, collect_conditions, describe_changes
 from picmatch import DEFAULT_PIC_DIR, describe_match, find_model_image
 
 # --------------------------------------------------------------------------- #
@@ -80,7 +81,7 @@ from picmatch import DEFAULT_PIC_DIR, describe_match, find_model_image
 
 LOG_FILENAME = "EMIRper.log"
 APP_TITLE = "EMI-Report"  # 窗口标题前缀（后面跟随数据路径的文件夹名）
-APP_VERSION = "2.8"
+APP_VERSION = "2.9"
 STATE_SAVE_DELAY_MS = 300  # 输入变化后延迟落盘的防抖时间
 SERIAL_REFRESH_DELAY_MS = 500  # 数据路径变化后延迟刷新序列号的防抖时间
 REPORT_FILE_SUFFIX = ".pdf"  # 提取序列号时依据的报告文件后缀
@@ -556,6 +557,8 @@ class EMIWindow(MainWindow):
         self.log_path: str | None = os.path.join(os.getcwd(), LOG_FILENAME)
         self.save_file_name: str | None = None
         self.report_data: dict[str, dict[str, Any]] = {}
+        self.detail_audit_changes: list[str] = []  # 测试描述按数据修正的记录
+        self.detail_audit_warnings: list[str] = []  # 需要人工确认的测试描述提示
         self.Text_log: QTextEdit | None = None
         self.progressBar: QProgressBar | None = None
         self.zip_progressBar: QProgressBar | None = None
@@ -1296,10 +1299,10 @@ class EMIWindow(MainWindow):
             self.settings_value,
         )
 
+        self._audit_test_detail(report_data)
         uut_name = self._write_header(sheet, model_dir_name)
         self._apply_detail_borders(sheet)
         self._insert_test_image(sheet)
-
         uut_count = len({name.split("-")[0] for name in report_data})
         if uut_count > MAX_UUT_COUNT:
             logger.warning(
@@ -1369,6 +1372,41 @@ class EMIWindow(MainWindow):
             len(detail),
         )
         return uut_name
+
+    def _audit_test_detail(self, report_data: dict[str, dict[str, Any]]) -> None:
+        """按实际数据校正测试描述里的电压 / 负载（以数据为准）。"""
+        detail = self.text_detail.toPlainText()
+        self.detail_audit_changes = []
+        if not detail.strip():
+            return
+
+        voltages, loads = collect_conditions(report_data)
+        new_detail, changes, warnings = audit_test_detail(detail, voltages, loads)
+        self.detail_audit_changes = changes
+        self.detail_audit_warnings = warnings
+        for warning in warnings:
+            logger.warning("测试描述需要人工确认: %s", warning)
+        if not changes:
+            logger.info(
+                "测试描述审查: 电压 / 负载与实际数据一致（电压=%s, 负载=%s）",
+                voltages,
+                loads,
+            )
+            return
+
+        self.text_detail.setPlainText(new_detail)
+        logger.warning(
+            "测试描述已按实际数据修正: %s（电压=%s, 负载=%s）",
+            describe_changes(changes),
+            voltages,
+            loads,
+        )
+        QMessageBox.information(
+            self,
+            self.tr("测试描述已修正"),
+            "测试描述里的测试条件与实际数据不一致，已按数据修正：\n"
+            + self._format_notice(changes),
+        )
 
     def _apply_detail_borders(self, sheet) -> None:
         """补齐「测试描述」区域的粗边框：模板只给了上 / 下 / 左，右边仍是细线。"""

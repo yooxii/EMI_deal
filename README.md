@@ -3,7 +3,7 @@
 EMI 传导骚扰（Conducted EMI）测试报告自动化工具：把 ELEKTRA 导出的 EMI PDF 报告解析成数据，按模板写入 Excel，并生成 / 嵌入原始 PDF 压缩包，产出一份可直接继续整理的报告底稿。界面基于 PySide6（QMainWindow + QThread）。
 
 - 主入口：[src/EMI-Report.py](src/EMI-Report.py)，窗口标题 `EMI-Report`
-- 版本：`2.8`（显示在「帮助 → 关于」窗口），变更历史见 [CHANGELOG.md](CHANGELOG.md)
+- 版本：`2.9`（显示在「帮助 → 关于」窗口），变更历史见 [CHANGELOG.md](CHANGELOG.md)
 - 作者：`Lucas Li`（Lucas_Li@acbel.com）
 - 面向使用者的说明：[使用须知/使用须知.md](使用须知/使用须知.md)
 - 远程仓库：https://github.com/yooxii/EMI_deal.git
@@ -16,7 +16,7 @@ EMI 传导骚扰（Conducted EMI）测试报告自动化工具：把 ELEKTRA 导
 | --- | --- |
 | 远程 | `https://github.com/yooxii/EMI_deal.git`（origin） |
 | 当前分支 | `master` |
-| 当前提交 | `2.8` 版本提交（插入机种测试图片、修复删行后格式错乱与测试描述框右边框） |
+| 当前提交 | `2.9` 版本提交（测试描述审查、替换数据另存、同系列机种名以概览为准） |
 | 与远程关系 | `2.2.1` 版本提交后与 `origin/master` 同步 |
 | 提交总数 | 16（含 `2.0` / `2.1` / `2.2` / `2.2.1` 版本提交） |
 | 工作区 | `2.0` 的改动已提交；`DealPdf.log` 被 `.gitignore` 忽略 |
@@ -35,6 +35,7 @@ EMI_deal/
 │  ├─ logger.py                     # 日志基础设施：主日志 / 错误日志 / 装饰器
 │  ├─ naming.py                     # 从报告文件名提取名称片段（序列号等）
 │  ├─ picmatch.py                   # 按机种名（含同系列前 6 位）在图片目录里匹配测试图片
+│  ├─ desc_audit.py                 # 测试描述审查：按实际数据校正电压 / 负载条件
 │  ├─ docx2pdf.py                   # 命令行版 docx→pdf 脚本（与 GUI 版功能重叠）
 │  ├─ test.py                       # 开发期试验：Word 表格读写（含本机绝对路径）
 │  ├─ test_openpyxl.py              # 开发期试验：删除模板 Setup 前 4 行
@@ -527,3 +528,27 @@ uv tool run ruff check --fix src     # 自动修复可修复项
 `gui.ui_wordreplace.replace_text_in_docx()` 默认会对测量数值做小幅随机抖动（造差异化数据），
 之前没有开关。新增 `jitter` 参数（默认 `True` 保持原行为）：纯文本替换场景传 `False`
 即保持测量值与源文档一致；批处理用 `jitter: false` 或 `--no-jitter` 打开该模式。
+
+### 15.5 测试描述审查（v2.9）
+
+描述里的测试条件是从 ORT Plan 抄的，未必和数据对上。[src/desc_audit.py](src/desc_audit.py)
+按「数据为准」改写，只审 `1. Test Condition` 段，`2. Pass/Fail Criteria` 不动：
+
+| 场景 | 处理 |
+| --- | --- |
+| `115VAC&230VAC`，实际 110V / 220V | 换成 `110VAC&220VAC`（保留原来的单位写法与分隔符） |
+| `110&220 VAC`（单位只写一次） | 识别成一组，集合一致就不动 |
+| `min load, 50% load and 100% load`，实际 25/50/100% | `min load` → `25% load`（min→最小档、full/max→最大档） |
+| 只写 `full load`，实际三档 | 补齐成 `25% load, 50% load and 100% load` |
+| 一行里有多段（`110Vac/60Hz, and 220Vac/50Hz`） | 不乱改，只记一条「请人工确认」 |
+
+生成报告时自动执行：改动写进日志并弹提示，批处理结果里是 `detail_audit`；
+需要人工确认的条目记成 warning。
+
+### 15.6 替换数据另存与机种名对齐（v2.9）
+
+- 批处理在替换完成后，把 docx 复制到 `<数据根>/<年>/<月>/<机种>`（默认数据根
+  `D:\Desktop_Li\WorkDir\EMC`，`--save-data-dir` 可改、`--no-save-data` 关闭）；
+  该月已有同名机种目录时用 `<机种>-1`、`<机种>-2`，**不覆盖**任何已有数据；只复制 docx。
+- 同系列借用数据时，临时工作目录、报告头 `F5`、压缩包名都改用**报告概览里的机种名**，
+  并把文档里的源机种名一起替换，保证报告 / 概览 / 数据三处一致。

@@ -67,6 +67,7 @@ for _stream in (sys.stdout, sys.stderr):
 logger = logging.getLogger("emi_batch")
 
 TEMPLATE_NAME_PATTERN = re.compile(r"_(\d+)\.xlsx$")
+DEFAULT_DATA_ROOT = r"D:\Desktop_Li\WorkDir\EMC"  # 替换数据另存的默认数据根目录
 
 
 class QuietMessageBox:
@@ -124,6 +125,7 @@ def default_template(main_mod: Any, load_qty: int) -> str:
 def load_jobs(args: argparse.Namespace) -> list[dict[str, Any]]:
     """从 --job 文件或命令行参数组装作业列表。"""
     pic_dir = "" if args.no_image else (args.pic_dir or DEFAULT_PIC_DIR)
+    data_root = "" if args.no_save_data else (args.save_data_dir or DEFAULT_DATA_ROOT)
     if args.job:
         with open(args.job, encoding="utf-8") as fp:
             payload = json.load(fp)
@@ -133,6 +135,7 @@ def load_jobs(args: argparse.Namespace) -> list[dict[str, Any]]:
         for job in jobs:
             # 命令行上的图片目录 / 图片路径优先于作业文件
             job.setdefault("pic_dir", pic_dir)
+            job.setdefault("save_data_dir", data_root)
             if args.no_image:
                 job["pic_dir"] = ""
                 job["image"] = ""
@@ -142,6 +145,10 @@ def load_jobs(args: argparse.Namespace) -> list[dict[str, Any]]:
                 job["image"] = args.image
             if args.no_jitter:
                 job["jitter"] = False
+            if args.no_save_data:
+                job["save_data_dir"] = ""
+            elif args.save_data_dir:
+                job["save_data_dir"] = args.save_data_dir
         return jobs
 
     detail = args.detail or ""
@@ -160,6 +167,7 @@ def load_jobs(args: argparse.Namespace) -> list[dict[str, Any]]:
         "test_date": args.date,
         "image": args.image or "",
         "pic_dir": pic_dir,
+        "save_data_dir": data_root,
         "out_dir": args.out,
         "out_name": args.name,
         "zip": args.zip,
@@ -287,6 +295,14 @@ def prepare_replaced_data(job: dict[str, Any]) -> tuple[str, str]:
     ]
     if not pairs:
         raise RuntimeError("replace_map 为空")
+
+    # 同系列借用数据时，文档里的机种名也要换成报告概览里的机种名（以概览为准）
+    source_model = os.path.basename(src.rstrip("\\/"))
+    target_model = job_model_name(job) or source_model
+    if target_model.upper() != source_model.upper():
+        pairs = [(source_model, target_model)] + pairs
+        logger.info("机种名一并替换: %s -> %s", source_model, target_model)
+
     # 部分源文档里序列号后面跟了一个字母（实测 FSM038-GQ1G 的 docx 里是 "…LJb"），
     # 只替换序列号会把这个尾字母留在结果里，因此顺带把「序列号+字母」的变体一并替换
     extra = []
@@ -301,9 +317,9 @@ def prepare_replaced_data(job: dict[str, Any]) -> tuple[str, str]:
     news = [new for _, new in pairs]
     placeholders = ["EMIBATCHPLACEHOLDER%d" % index for index in range(len(pairs))]
 
-    model = os.path.basename(src.rstrip("\\/"))
     temp_root = tempfile.mkdtemp(prefix="emi_repl_")
-    work_dir = os.path.join(temp_root, model)
+    # 临时工作目录用目标机种名：报告头（F5）与压缩包名都取自目录名
+    work_dir = os.path.join(temp_root, target_model)
     os.makedirs(work_dir, exist_ok=True)
 
     from gui.ui_wordreplace import replace_text_in_docx
@@ -397,6 +413,53 @@ def resolve_image(job: dict[str, Any]) -> str:
     return ""
 
 
+def save_replaced_docx(job: dict[str, Any], work_dir: str, root: str) -> str | None:
+    """把序列号已替换的 docx 另存到数据目录 ``<年>/<月>/<机种>`` 下，绝不覆盖已有数据。
+
+    - 月份取作业的 ``_month``（如 ``5月``），没有就从 ``out_dir`` 的报告路径里推断；
+    - 目标目录已存在（该月已有同名机种）时改用 ``<机种>-1``、``<机种>-2`` ……；
+    - 只复制 docx，PDF 不复制。
+    """
+    if not root:
+        return None
+    docx_names = [n for n in os.listdir(work_dir) if n.lower().endswith(".docx")]
+    if not docx_names:
+        return None
+
+    month = str(job.get("_month") or "").strip()
+    year = ""
+    if not month:
+        out_dir = str(job.get("out_dir") or "").replace("/", "\\")
+        match = re.search(r"\\(\d{4}) EMI[^\\]*\\(\d{1,2})月", out_dir)
+        if match:
+            year, month = match.group(1), "%s月" % match.group(2)
+    else:
+        match = re.search(r"\\(\d{4}) EMI[^\\]*\\", str(job.get("out_dir") or ""))
+        year = match.group(1) if match else time.strftime("%Y")
+    if not month:
+        logger.warning("无法判断报告月份，替换数据未保存到数据目录: %s", work_dir)
+        return None
+
+    month_number = re.search(r"\d{1,2}", month)
+    if not month_number:
+        logger.warning("月份格式无法识别（%s），替换数据未保存。", month)
+        return None
+    year = year or time.strftime("%Y")
+    model = job_model_name(job)
+
+    base = os.path.join(root, year, "%02d" % int(month_number.group(0)))
+    target = os.path.join(base, model)
+    index = 1
+    while os.path.exists(target):
+        target = os.path.join(base, "%s-%d" % (model, index))
+        index += 1
+    os.makedirs(target, exist_ok=True)
+    for name in docx_names:
+        shutil.copy2(os.path.join(work_dir, name), os.path.join(target, name))
+    logger.info("替换后的 docx 已另存到数据目录: %s（%d 份）", target, len(docx_names))
+    return target
+
+
 def strip_model_suffix(filename: str, model: str) -> str:
     """去掉输出文件名末尾的下划线与机种名（``..._FSF059-00CG.xlsx`` → ``....xlsx``）。"""
     stem, ext = os.path.splitext(filename)
@@ -409,7 +472,8 @@ def strip_model_suffix(filename: str, model: str) -> str:
 def run_job(main_mod: Any, win: Any, job: dict[str, Any], dry_run: bool = False) -> dict:
     """执行一个作业，返回结果字典。"""
     started_at = time.perf_counter()
-    model = os.path.basename(os.path.abspath(job["data_dir"]).rstrip("\\/"))
+    # 机种名以报告概览为准（同系列借用数据时 data_dir 是别的机种）
+    model = job_model_name(job)
     load_qty = int(job.get("load_qty") or main_mod.DEFAULT_LOAD_QTY)
     template = job.get("template") or default_template(main_mod, load_qty)
     if not os.path.exists(template):
@@ -417,9 +481,12 @@ def run_job(main_mod: Any, win: Any, job: dict[str, Any], dry_run: bool = False)
 
     os.chdir(REPO_ROOT)
     converted = 0
+    saved_data_dir = None
     if job.get("replace_map"):
         # 借用其它周期的同名机种数据：先 Word 替换序列号，再转 PDF
         work_dir, temp_root = prepare_replaced_data(job)
+        if job.get("save_data_dir"):
+            saved_data_dir = save_replaced_docx(job, work_dir, job["save_data_dir"])
         if job.get("docx2pdf", True):
             converted = ensure_pdfs(work_dir, job.get("serials") or [])
     else:
@@ -475,6 +542,7 @@ def run_job(main_mod: Any, win: Any, job: dict[str, Any], dry_run: bool = False)
 
         os.chdir(REPO_ROOT)
         win.save_file_name = None
+        win.detail_audit_changes = []
         win.main_func(report_data)
         saved = win.save_file_name
         if not saved:
@@ -556,6 +624,8 @@ def run_job(main_mod: Any, win: Any, job: dict[str, Any], dry_run: bool = False)
             "backup_file": backup_path,
             "zip_file": zip_path,
             "image": image_path,
+            "detail_audit": list(getattr(win, "detail_audit_changes", []) or []),
+            "saved_data_dir": saved_data_dir,
             "docx_converted": converted,
             "seconds": round(time.perf_counter() - started_at, 2),
         }
@@ -585,6 +655,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="测试图片目录（默认 %s，按机种名/同系列自动匹配）" % DEFAULT_PIC_DIR,
     )
     parser.add_argument("--no-image", action="store_true", help="不插入测试图片")
+    parser.add_argument(
+        "--save-data-dir",
+        default=None,
+        help="把替换出来的 docx 另存到该数据根目录的 <年>/<月>/<机种>（默认 %s）"
+        % DEFAULT_DATA_ROOT,
+    )
+    parser.add_argument(
+        "--no-save-data", action="store_true", help="不另存替换出来的 docx"
+    )
     parser.add_argument("--out", help="报告输出目录")
     parser.add_argument("--name", help="报告文件名")
     parser.add_argument("--zip", action="store_true", help="生成 PDF 压缩包")
